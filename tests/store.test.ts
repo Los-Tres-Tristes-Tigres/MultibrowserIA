@@ -16,6 +16,33 @@ afterEach(async () => {
     await fs.rm(root, { recursive: true, force: true });
 });
 describe("local workspaces", () => {
+  it("defaults new local agents to shared while legacy records migrate as isolated", async () => {
+    const s = await store();
+    const p = await s.create("Migration", true);
+    expect(p.agents.every((agent) => agent.browserSession === "shared")).toBe(
+      true,
+    );
+    await s.flush(p.id);
+    for (const agent of p.agents) {
+      const stateFile = path.join(s.agentPath(p.id, agent.id), "state.json");
+      const state = JSON.parse(await fs.readFile(stateFile, "utf8"));
+      delete state.browserSession;
+      await fs.writeFile(stateFile, JSON.stringify(state));
+    }
+    const projectFile = path.join(s.projectPath(p.id), "project.json");
+    const project = JSON.parse(await fs.readFile(projectFile, "utf8"));
+    project.agents.forEach(
+      (agent: Record<string, unknown>) => delete agent.browserSession,
+    );
+    await fs.writeFile(projectFile, JSON.stringify(project));
+    const restored = new WorkspaceStore(s.root);
+    await restored.init();
+    expect(
+      restored
+        .get(p.id)
+        .agents.every((agent) => agent.browserSession === "isolated"),
+    ).toBe(true);
+  });
   it("restores nodes, positions, connections, isolated chats and browser profile data", async () => {
     const s = await store();
     const p = await s.create("Test project", true);

@@ -12,20 +12,35 @@ import { z } from "zod";
 import { WorkspaceStore } from "./store.js";
 import { stagehandClient } from "./providers.js";
 import { AppError, publicError, webUrl } from "./validation.js";
-import type { BrowserAction, BrowserAgentRecord } from "../shared/types.js";
+import type {
+  BrowserAction,
+  BrowserAgentRecord,
+  BrowserSessionMode,
+} from "../shared/types.js";
 import type { TargetEvidence } from "./policy.js";
 
+interface BrowserHost {
+  context: BrowserContext;
+  cdpUrl: string;
+  profile: string;
+  shared: boolean;
+  closing: boolean;
+  cookieSnapshot?: string;
+  cookieSave?: Promise<void>;
+}
 export interface BrowserSession {
+  host: BrowserHost;
   context: BrowserContext;
   page: Page;
+  pages: Set<Page>;
   cdpUrl: string;
+  mode: BrowserSessionMode;
   stagehand?: Stagehand;
   modelKey?: string;
-  timer: ReturnType<typeof setInterval>;
+  timer?: ReturnType<typeof setInterval>;
   capturing: boolean;
   closing: boolean;
   generation: string;
-  cookieSnapshot?: string;
 }
 // Methods returned by Stagehand observe() that Orbit executes itself. Drag-and-drop and coordinate input are not supported.
 const ALLOWED_METHODS = new Set([
@@ -49,6 +64,8 @@ export class BrowserManager {
   private sessions = new Map<string, BrowserSession>();
   private opening = new Map<string, Promise<BrowserSession>>();
   private previews = new Map<string, Buffer>();
+  private sharedHost?: BrowserHost;
+  private sharedOpening?: Promise<BrowserHost>;
   /** Local ports agents must never reach: Orbit itself and, in Docker, the noVNC viewer. */
   readonly blockedPorts = new Set<number>();
   constructor(
@@ -58,8 +75,20 @@ export class BrowserManager {
       channel?: string;
       executablePath?: string;
       previewInterval?: number;
+      sharedSessionAvailable?: boolean;
     } = {},
   ) {}
+  get sharedSessionAvailable() {
+    return (
+      this.options.sharedSessionAvailable ??
+      process.env.ORBIT_SHARED_BROWSER !== "false"
+    );
+  }
+  get defaultSession(): BrowserSessionMode {
+    return this.sharedSessionAvailable
+      ? this.store.defaultBrowserSession
+      : "isolated";
+  }
   key(projectId: string, agentId: string) {
     return `${projectId}/${agentId}`;
   }
@@ -108,9 +137,9 @@ export class BrowserManager {
     agentId: string,
     session: BrowserSession,
   ) {
-    if (!session.context.pages().some((page) => !page.isClosed())) {
-      // Chrome keeps running after its last tab closes; bring a page back instead of failing on every open.
+    if (![...session.pages].some((page) => !page.isClosed())) {
       session.page = await session.context.newPage();
+      this.watchPage(projectId, agentId, session, session.page);
       await session.page.goto(
         this.startUrl(this.store.agent(projectId, agentId)),
         { waitUntil: "domcontentloaded" },
@@ -119,13 +148,15 @@ export class BrowserManager {
     await this.currentPage(session).bringToFront();
     return session;
   }
-  private async launch(projectId: string, agentId: string) {
-    const agent = this.store.agent(projectId, agentId);
-    const key = this.key(projectId, agentId);
-    const profile = path.join(
-      this.store.agentPath(projectId, agentId),
-      "browser-profile",
-    );
+  private async ensureProfile(profile: string) {
+    await fs.mkdir(profile, { recursive: true, mode: 0o700 });
+    const stat = await fs.lstat(profile);
+    if (stat.isSymbolicLink() || !stat.isDirectory())
+      throw new AppError("Browser profile path is not a safe directory.", 500);
+    await fs.chmod(profile, 0o700);
+  }
+  private async launchHost(profile: string, shared: boolean) {
+    await this.ensureProfile(profile);
     const executablePath =
       this.options.executablePath ||
       process.env.ORBIT_BROWSER_EXECUTABLE_PATH ||
@@ -181,17 +212,14 @@ export class BrowserManager {
           .parse(JSON.parse(cookieData));
         await context.addCookies(cookies);
       }
-      const page = context.pages()[0] || (await context.newPage());
-      const session: BrowserSession = {
+      const host: BrowserHost = {
         context,
-        page,
         cdpUrl: `ws://127.0.0.1:${Number(portFile[0])}${portFile[1].trim()}`,
-        timer: undefined as never,
-        capturing: false,
+        profile,
+        shared,
         closing: false,
-        generation: randomUUID(),
+        cookieSnapshot: cookieData || undefined,
       };
-      this.sessions.set(key, session);
       await context.route("**/*", async (route) => {
         try {
           this.validateUrl(route.request().url());
@@ -200,68 +228,206 @@ export class BrowserManager {
           await route.abort();
         }
       });
-      const watch = (p: Page) => {
-        p.setDefaultTimeout(15000);
-        p.setDefaultNavigationTimeout(45000);
-        p.on("download", (download) => {
-          void (async () => {
-            const basename =
-              path
-                .basename(download.suggestedFilename())
-                .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
-                .slice(0, 180) || "download";
-            const id = randomUUID();
-            const name = `${id.slice(0, 8)}-${basename}`;
-            const relativePath = path.join("downloads", name);
-            await download.saveAs(
-              path.join(this.store.agentPath(projectId, agentId), relativePath),
-            );
-            agent.artifacts.push({
-              id,
-              name: basename,
-              kind: "download",
-              relativePath,
-              createdAt: new Date().toISOString(),
-            });
-            await this.store.log(
-              projectId,
-              `Downloaded ${basename}`,
-              agentId,
-              agent.activeRunId,
-              "success",
-            );
-          })().catch((error) =>
-            this.store
-              .log(
-                projectId,
-                `Download failed: ${publicError(error)}`,
-                agentId,
-                agent.activeRunId,
-                "error",
-              )
-              .catch(() => {}),
-          );
+      return host;
+    } catch (error) {
+      await context.close().catch(() => {});
+      throw error;
+    }
+  }
+  private async sharedBrowser() {
+    if (!this.sharedSessionAvailable)
+      throw new AppError(
+        "Shared Chrome sessions are available only in local desktop mode.",
+        409,
+      );
+    if (this.sharedHost && !this.sharedHost.closing) return this.sharedHost;
+    if (this.sharedOpening) return this.sharedOpening;
+    const operation = this.launchHost(
+      this.store.sharedBrowserProfilePath(),
+      true,
+    );
+    this.sharedOpening = operation;
+    try {
+      const host = await operation;
+      this.sharedHost = host;
+      host.context.on("close", () => this.hostClosed(host));
+      return host;
+    } finally {
+      this.sharedOpening = undefined;
+    }
+  }
+  private hostClosed(host: BrowserHost) {
+    host.closing = true;
+    if (this.sharedHost === host) this.sharedHost = undefined;
+    for (const [key, session] of this.sessions) {
+      if (session.host !== host) continue;
+      this.finishSession(key, session, true);
+    }
+  }
+  private finishSession(
+    key: string,
+    session: BrowserSession,
+    unexpected: boolean,
+  ) {
+    if (session.timer) clearInterval(session.timer);
+    session.closing = true;
+    if (this.sessions.get(key) === session) this.sessions.delete(key);
+    this.previews.delete(key);
+    const [projectId, agentId] = key.split("/");
+    let agent: BrowserAgentRecord;
+    try {
+      agent = this.store.agent(projectId, agentId);
+    } catch {
+      return;
+    }
+    agent.browserOpen = false;
+    if (unexpected && agent.activeRunId)
+      this.store.emit("browserClosed", { projectId, agentId });
+    else if (!agent.activeRunId) {
+      agent.status = "Idle";
+      agent.currentAction = "Browser closed · session saved";
+    }
+    void session.stagehand?.close().catch(() => {});
+    void this.store.save(projectId).catch(() => {});
+  }
+  private watchPage(
+    projectId: string,
+    agentId: string,
+    session: BrowserSession,
+    page: Page,
+  ) {
+    if (session.pages.has(page)) return;
+    session.pages.add(page);
+    page.setDefaultTimeout(15000);
+    page.setDefaultNavigationTimeout(45000);
+    page.on("popup", (popup) => {
+      this.watchPage(projectId, agentId, session, popup);
+      session.page = popup;
+    });
+    page.on("close", () => {
+      session.pages.delete(page);
+      if (session.page === page) {
+        const pages = [...session.pages].filter(
+          (candidate) => !candidate.isClosed(),
+        );
+        if (pages.length) session.page = pages.at(-1)!;
+      }
+      if (
+        !session.pages.size &&
+        !session.closing &&
+        session.mode === "shared"
+      )
+        this.finishSession(this.key(projectId, agentId), session, true);
+    });
+    page.on("download", (download) => {
+      void (async () => {
+        const agent = this.store.agent(projectId, agentId);
+        const basename =
+          path
+            .basename(download.suggestedFilename())
+            .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+            .slice(0, 180) || "download";
+        const id = randomUUID();
+        const name = `${id.slice(0, 8)}-${basename}`;
+        const relativePath = path.join("downloads", name);
+        await download.saveAs(
+          path.join(this.store.agentPath(projectId, agentId), relativePath),
+        );
+        agent.artifacts.push({
+          id,
+          name: basename,
+          kind: "download",
+          relativePath,
+          createdAt: new Date().toISOString(),
         });
-      };
-      context.pages().forEach(watch);
-      context.on("page", (p) => {
-        watch(p);
-        session.page = p;
+        await this.store.log(
+          projectId,
+          `Downloaded ${basename}`,
+          agentId,
+          agent.activeRunId,
+          "success",
+        );
+      })().catch((error) =>
+        this.store
+          .log(
+            projectId,
+            `Download failed: ${publicError(error)}`,
+            agentId,
+            undefined,
+            "error",
+          )
+          .catch(() => {}),
+      );
+    });
+  }
+  private unusedSharedPage(host: BrowserHost) {
+    const assigned = new Set(
+      [...this.sessions.values()]
+        .filter((session) => session.host === host)
+        .flatMap((session) => [...session.pages]),
+    );
+    return host.context
+      .pages()
+      .find(
+        (page) =>
+          !page.isClosed() &&
+          !assigned.has(page) &&
+          ["about:blank", "chrome://new-tab-page/"].includes(page.url()),
+      );
+  }
+  /** True while this agent's browser is starting or being brought back. */
+  isOpening(projectId: string, agentId: string) {
+    return this.opening.has(this.key(projectId, agentId));
+  }
+  private async launch(projectId: string, agentId: string) {
+    const agent = this.store.agent(projectId, agentId);
+    // Read once: settings can change while Chrome starts, and the session must match its host.
+    const mode = agent.browserSession;
+    if (mode === "shared" && !this.sharedSessionAvailable)
+      throw new AppError(
+        "This agent uses the local shared Chrome session, which is unavailable in Docker.",
+        409,
+      );
+    const key = this.key(projectId, agentId);
+    const profile =
+      mode === "shared"
+        ? this.store.sharedBrowserProfilePath()
+        : path.join(
+            this.store.agentPath(projectId, agentId),
+            "browser-profile",
+          );
+    const host =
+      mode === "shared"
+        ? await this.sharedBrowser()
+        : await this.launchHost(profile, false);
+    const page =
+      (mode === "shared" && this.unusedSharedPage(host)) ||
+      (mode === "isolated" && host.context.pages()[0]) ||
+      (await host.context.newPage());
+    const session: BrowserSession = {
+      host,
+      context: host.context,
+      page,
+      pages: new Set(),
+      cdpUrl: host.cdpUrl,
+      mode,
+      capturing: false,
+      closing: false,
+      generation: randomUUID(),
+    };
+    this.sessions.set(key, session);
+    this.watchPage(projectId, agentId, session, page);
+    if (!host.shared) {
+      host.context.on("page", (newPage) => {
+        this.watchPage(projectId, agentId, session, newPage);
+        session.page = newPage;
       });
-      context.on("close", () => {
-        clearInterval(session.timer);
-        session.closing = true;
-        if (this.sessions.get(key) === session) this.sessions.delete(key);
-        agent.browserOpen = false;
-        if (agent.activeRunId)
-          this.store.emit("browserClosed", { projectId, agentId });
-        else {
-          agent.status = "Idle";
-          agent.currentAction = "Browser closed · session saved";
-        }
-        void session.stagehand?.close().catch(() => {});
-        void this.store.save(projectId).catch(() => {});
+      host.context.on("close", () => {
+        host.closing = true;
+        this.finishSession(key, session, true);
       });
+    }
+    try {
       agent.browserOpen = true;
       const startUrl = this.startUrl(agent);
       try {
@@ -278,7 +444,10 @@ export class BrowserManager {
       }
       await page.bringToFront();
       if (!agent.activeRunId) {
-        agent.currentAction = "Browser ready · log in manually if needed";
+        agent.currentAction =
+          mode === "shared"
+            ? "Shared Chrome ready · one account across tabs"
+            : "Browser ready · log in manually if needed";
         agent.status = "Idle";
       }
       session.timer = setInterval(() => {
@@ -293,13 +462,13 @@ export class BrowserManager {
       );
       return session;
     } catch (error) {
-      await context.close().catch(() => {});
+      await this.close(projectId, agentId).catch(() => {});
       throw error;
     }
   }
   currentPage(session: BrowserSession) {
     if (session.page.isClosed()) {
-      const pages = session.context.pages().filter((p) => !p.isClosed());
+      const pages = [...session.pages].filter((p) => !p.isClosed());
       if (!pages.length)
         throw new AppError("Browser closed. Open it again to continue.", 409);
       session.page = pages.at(-1)!;
@@ -325,12 +494,11 @@ export class BrowserManager {
         timeout: 5000,
       });
       this.previews.set(this.key(projectId, agentId), buffer);
-      await this.saveSessionCookies(projectId, agentId, session);
+      await this.saveSessionCookies(session);
       const agent = this.store.agent(projectId, agentId);
       // Remember websites only: internal pages (chrome://, about:blank) cannot be reopened later.
       const url = page.url();
-      const changed =
-        webUrl.safeParse(url).success && agent.currentUrl !== url;
+      const changed = webUrl.safeParse(url).success && agent.currentUrl !== url;
       if (changed) agent.currentUrl = url;
       agent.pageTitle = await page.title().catch(() => "");
       this.store.emit("preview", { projectId, agentId, timestamp: Date.now() });
@@ -339,26 +507,25 @@ export class BrowserManager {
       session.capturing = false;
     }
   }
-  private async saveSessionCookies(
-    projectId: string,
-    agentId: string,
-    session: BrowserSession,
-  ) {
-    const data = JSON.stringify(
-      (await session.context.cookies()).filter(
-        (cookie) => cookie.expires === -1,
-      ),
-    );
-    if (data === session.cookieSnapshot) return;
-    const target = path.join(
-      this.store.agentPath(projectId, agentId),
-      "browser-profile",
-      "orbit-session.json",
-    );
-    const temporary = `${target}.${randomUUID()}.tmp`;
-    await fs.writeFile(temporary, data, { mode: 0o600 });
-    await fs.rename(temporary, target);
-    session.cookieSnapshot = data;
+  private async saveSessionCookies(session: BrowserSession) {
+    const { host } = session;
+    const save = (host.cookieSave || Promise.resolve())
+      .catch(() => {})
+      .then(async () => {
+        const data = JSON.stringify(
+          (await host.context.cookies()).filter(
+            (cookie) => cookie.expires === -1,
+          ),
+        );
+        if (data === host.cookieSnapshot) return;
+        const target = path.join(host.profile, "orbit-session.json");
+        const temporary = `${target}.${randomUUID()}.tmp`;
+        await fs.writeFile(temporary, data, { mode: 0o600 });
+        await fs.rename(temporary, target);
+        host.cookieSnapshot = data;
+      });
+    host.cookieSave = save;
+    await save;
   }
   async automation(projectId: string, agentId: string) {
     const s = this.session(projectId, agentId);
@@ -599,7 +766,8 @@ export class BrowserManager {
       case "prevChunk":
         await locator.evaluate(
           (el, { method, value }) => {
-            const whole = el === document.body || el === document.documentElement;
+            const whole =
+              el === document.body || el === document.documentElement;
             const box = whole
               ? document.scrollingElement || document.documentElement
               : el;
@@ -614,8 +782,7 @@ export class BrowserManager {
               return;
             }
             const height = whole ? window.innerHeight : box.clientHeight;
-            const direction =
-              method === "prevChunk" || value === "up" ? -1 : 1;
+            const direction = method === "prevChunk" || value === "up" ? -1 : 1;
             box.scrollBy({ top: direction * Math.max(200, height * 0.85) });
           },
           { method: action.method, value: arg },
@@ -658,12 +825,17 @@ export class BrowserManager {
     const s = this.sessions.get(key);
     if (!s) return;
     s.closing = true;
-    clearInterval(s.timer);
-    await this.saveSessionCookies(projectId, agentId, s).catch(() => {});
+    if (s.timer) clearInterval(s.timer);
+    await this.saveSessionCookies(s).catch(() => {});
     await s.stagehand?.close().catch(() => {});
-    await s.context.close();
-    this.sessions.delete(key);
-    this.previews.delete(key);
+    if (s.mode === "shared") {
+      await Promise.all(
+        [...s.pages]
+          .filter((page) => !page.isClosed())
+          .map((page) => page.close().catch(() => {})),
+      );
+    } else await s.context.close();
+    this.finishSession(key, s, false);
     const agent = this.store.agent(projectId, agentId);
     agent.browserOpen = false;
     await this.store.save(projectId);
@@ -675,5 +847,11 @@ export class BrowserManager {
         return this.close(projectId, agentId).catch(() => {});
       }),
     );
+    const shared = this.sharedHost;
+    if (shared && !shared.closing) {
+      shared.closing = true;
+      await shared.context.close().catch(() => {});
+    }
+    if (this.sharedHost === shared) this.sharedHost = undefined;
   }
 }

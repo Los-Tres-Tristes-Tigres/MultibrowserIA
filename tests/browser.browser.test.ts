@@ -19,7 +19,7 @@ let root: string,
   url: string;
 beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "orbit-browser-test-"));
-  store = new WorkspaceStore(root);
+  store = new WorkspaceStore(root, "isolated");
   await store.init();
   fixture = createServer((req, res) => {
     if (req.url === "/download") {
@@ -219,9 +219,9 @@ describe("real Chromium browser engine", () => {
     await session.page
       .locator("#save")
       .evaluate((el) => el.classList.replace("idle", "hovered"));
-    expect(
-      fingerprint(await browsers.evidence(project.id, b.id, save)),
-    ).toBe(fingerprint(first));
+    expect(fingerprint(await browsers.evidence(project.id, b.id, save))).toBe(
+      fingerprint(first),
+    );
     await session.page.fill("#title", "Changed by user");
     expect(
       fingerprint(await browsers.evidence(project.id, b.id, save)),
@@ -242,5 +242,140 @@ describe("real Chromium browser engine", () => {
     expect(guard.validateUrl("https://calendar.google.com/")).toBe(
       "https://calendar.google.com/",
     );
+  });
+});
+
+describe("shared Orbit Chrome profile", () => {
+  it("shares one persistent login across projects while keeping pages and files attributed", async () => {
+    const sharedRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "orbit-shared-browser-test-"),
+    );
+    const sharedStore = new WorkspaceStore(sharedRoot, "shared");
+    await sharedStore.init();
+    const firstProject = await sharedStore.create("Shared one");
+    const secondProject = await sharedStore.create("Shared two");
+    const first = await sharedStore.addAgent(firstProject.id, {
+      name: "Gmail",
+      preset: "gmail",
+      url,
+      instructions: "",
+      provider: { provider: "openai", model: "gpt-4.1" },
+    });
+    const second = await sharedStore.addAgent(secondProject.id, {
+      name: "Calendar",
+      preset: "calendar",
+      url,
+      instructions: "",
+      provider: { provider: "openai", model: "gpt-4.1" },
+    });
+    const sharedBrowsers = new BrowserManager(sharedStore, {
+      headless: true,
+      previewInterval: 500,
+    });
+    let restartedBrowsers: BrowserManager | undefined;
+    try {
+      const gmail = await sharedBrowsers.open(firstProject.id, first.id);
+      await gmail.context.addCookies([
+        { name: "orbitShared", value: "signed-in", url },
+      ]);
+      await gmail.page.evaluate(() =>
+        localStorage.setItem("orbit-account", "personal"),
+      );
+      const calendar = await sharedBrowsers.open(secondProject.id, second.id);
+      expect(calendar.context).toBe(gmail.context);
+      expect(calendar.cdpUrl).toBe(gmail.cdpUrl);
+      expect(calendar.page).not.toBe(gmail.page);
+      expect(
+        (await calendar.context.cookies()).find(
+          (cookie) => cookie.name === "orbitShared",
+        )?.value,
+      ).toBe("signed-in");
+      expect(
+        await calendar.page.evaluate(() =>
+          localStorage.getItem("orbit-account"),
+        ),
+      ).toBe("personal");
+      await gmail.page.getByRole("link", { name: "Download notes" }).click();
+      await expect.poll(() => first.artifacts.length).toBe(1);
+      expect(second.artifacts).toHaveLength(0);
+
+      await sharedBrowsers.close(firstProject.id, first.id);
+      expect(calendar.page.isClosed()).toBe(false);
+      expect(second.browserOpen).toBe(true);
+      await sharedBrowsers.closeAll();
+
+      const restoredStore = new WorkspaceStore(sharedRoot, "shared");
+      await restoredStore.init();
+      restartedBrowsers = new BrowserManager(restoredStore, {
+        headless: true,
+      });
+      const restoredAgent = restoredStore.agent(secondProject.id, second.id);
+      const restored = await restartedBrowsers.open(
+        secondProject.id,
+        second.id,
+      );
+      expect(
+        (await restored.context.cookies()).find(
+          (cookie) => cookie.name === "orbitShared",
+        )?.value,
+      ).toBe("signed-in");
+      expect(
+        await restored.page.evaluate(() =>
+          localStorage.getItem("orbit-account"),
+        ),
+      ).toBe("personal");
+      await restartedBrowsers.close(secondProject.id, restoredAgent.id);
+      await restoredStore.removeAgent(secondProject.id, restoredAgent.id);
+      expect(
+        (await fs.stat(restoredStore.sharedBrowserProfilePath())).isDirectory(),
+      ).toBe(true);
+    } finally {
+      await restartedBrowsers?.closeAll().catch(() => {});
+      await sharedBrowsers.closeAll().catch(() => {});
+      await fs.rm(sharedRoot, { recursive: true, force: true });
+    }
+  });
+  it("keeps the mode a browser was opened with when settings change during launch", async () => {
+    const modeRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "orbit-shared-mode-test-"),
+    );
+    const modeStore = new WorkspaceStore(modeRoot, "shared");
+    await modeStore.init();
+    const modeProject = await modeStore.create("Mode change");
+    const first = await modeStore.addAgent(modeProject.id, {
+      name: "Gmail",
+      preset: "gmail",
+      url,
+      instructions: "",
+      provider: { provider: "openai", model: "gpt-4.1" },
+    });
+    const second = await modeStore.addAgent(modeProject.id, {
+      name: "Calendar",
+      preset: "calendar",
+      url,
+      instructions: "",
+      provider: { provider: "openai", model: "gpt-4.1" },
+    });
+    const modeBrowsers = new BrowserManager(modeStore, {
+      headless: true,
+      previewInterval: 500,
+    });
+    try {
+      const gmail = await modeBrowsers.open(modeProject.id, first.id);
+      const opening = modeBrowsers.open(modeProject.id, second.id);
+      expect(modeBrowsers.isOpening(modeProject.id, second.id)).toBe(true);
+      // A settings change that lands while Chrome starts must not take another agent's tab.
+      second.browserSession = "isolated";
+      const calendar = await opening;
+      expect(calendar.mode).toBe("shared");
+      expect(calendar.context).toBe(gmail.context);
+      expect(calendar.page).not.toBe(gmail.page);
+      await modeBrowsers.close(modeProject.id, second.id);
+      expect(gmail.page.isClosed()).toBe(false);
+      expect(first.browserOpen).toBe(true);
+    } finally {
+      await modeBrowsers.closeAll().catch(() => {});
+      await fs.rm(modeRoot, { recursive: true, force: true });
+    }
   });
 });

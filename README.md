@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open [Orbit](http://127.0.0.1:4173). The first launch creates **Hackathon Ops**, with Gmail → Calendar and idle browsers. Those cards show real screenshots only after you open a browser.
+Open [Orbit](http://127.0.0.1:4173). The first launch creates **Hackathon Ops**, with Gmail → Calendar and idle browsers. New local agents use the dedicated **Orbit Shared** Chrome profile by default: sign in to your Google account once and every shared agent opens its own tab with that session. Orbit never copies or controls the personal Chrome profile you use every day. Those cards show real screenshots only after you open a browser.
 
 Copy `.env.example` to `.env` and supply at least one key:
 
@@ -38,7 +38,7 @@ Stop the dev process first. Both commands use port 4173 (`PORT` overrides it). O
 
 ## Docker
 
-One container runs Orbit, Chromium agents on a virtual display and a noVNC viewer (linux/amd64 and linux/arm64).
+One container runs Orbit, Chromium agents on a virtual display and a noVNC viewer (linux/amd64 and linux/arm64). Docker intentionally keeps agent profiles isolated because a container cannot control the host's Chrome profile.
 
 ```sh
 cp .env.example .env                           # add GEMINI_API_KEY; optionally TZ=America/Lima
@@ -56,7 +56,7 @@ The image uses Playwright’s Chromium because Google Chrome has no Linux arm64 
 ## Gmail → Calendar demo
 
 1. Select **Gemini / AI Studio** and a model in the Gmail and Calendar settings (•••).
-2. Open each browser and log in **manually**. Every node has a different browser profile; Gmail and Calendar need separate logins even for the same Google account. Orbit never types passwords or handles CAPTCHA/2FA.
+2. Run Orbit locally, open Gmail and log in **manually** to the dedicated Orbit Shared Chrome profile. Calendar and every other shared node reuse that login in their own tabs. Orbit never types passwords or handles CAPTCHA/2FA. Agents restored from an older Orbit version remain isolated until you close their browser and select **Shared Orbit session** in settings.
 3. Send yourself a clearly marked test request, for example subject `[ORBIT-TEST] Meeting request`, with an explicit date, time, timezone and duration, and no other guests.
 4. Click **Run workflow**, review the task, then run it. The first browser reads the request; its structured result is transferred over the edge to the second browser (**Incoming context** in the Calendar chat).
 5. Watch previews or use **Open Browser**. Respond in the agent’s Chat if information or login is needed.
@@ -72,10 +72,11 @@ Create more nodes with **Add Browser Agent**. Presets only supply a name, icon a
 Projects are real folders under `~/Orbit Workspaces/<name-id>` (resolved with `os.homedir()`); `ORBIT_WORKSPACES_DIR` overrides the root.
 
 ```text
+orbit-shared-browser-profile/ # one local Chrome login shared across workspaces
 project.json
 events.jsonl
 agents/<uuid>/
-  browser-profile/   # Chrome profile + private session-cookie snapshot
+  browser-profile/   # retained/used only for independent agents
   downloads/
   artifacts/
   logs/events.jsonl
@@ -83,7 +84,9 @@ agents/<uuid>/
 workflows/definitions.json
 ```
 
-Profiles are reused, including session cookies that Chrome otherwise discards at shutdown. Expired or server-revoked logins still require manual login. Closing Orbit cancels tasks and saves state. Reopening never silently replays pending actions or approvals. Deleting an agent asks for confirmation and permanently deletes its profile and files.
+The local default is `shared`: one persistent **Orbit Shared** Chrome process, one tab per agent and one login across all workspaces. Chats, pages, previews, downloads, logs and approvals remain attributed to their agent. Closing one shared agent closes only its tabs; deleting it never deletes the shared account. Existing agents without a session setting migrate safely as `isolated` and keep their old profile as a backup. Change a closed, idle agent from **Independent profile** to **Shared Orbit session** in its settings. `ORBIT_DEFAULT_BROWSER_SESSION=isolated` changes the default for new agents, and `ORBIT_SHARED_BROWSER=false` disables shared sessions (Docker sets both).
+
+Profiles are reused, including session cookies that Chrome otherwise discards at shutdown. Expired or server-revoked logins still require manual login. Closing Orbit cancels tasks and saves state. Reopening never silently replays pending actions or approvals. Deleting an isolated agent asks for confirmation and permanently deletes its profile and files.
 
 The planner chooses one step at a time. Stagehand observes/extracts; Playwright executes the exact resolved action. Read-only navigation, scrolling and search can run automatically. State-changing and ambiguous controls require approval, including non-search text fields that might auto-save, typed line breaks and script links (`href="#"`). This conservative MVP can ask for several approvals when filling a form. An approval records the target and the values of its form (a form, a dialog, or the nearest container with fields); if they change, the action is not executed. If a target cannot be resolved, nothing runs and the planner is told; three consecutive failures stop the run. A failed action stops the run; external writes are never automatically retried. Default limit: 30 steps (`ORBIT_MAX_STEPS`, capped at 100).
 

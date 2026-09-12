@@ -10,6 +10,9 @@ services:
         required: false
     environment:
       TZ: ${TZ:-UTC}
+      # Containers use their own Chromium profiles. They cannot control the host's personal Chrome.
+      ORBIT_SHARED_BROWSER: "false"
+      ORBIT_DEFAULT_BROWSER_SESSION: isolated
     ports:
       - "127.0.0.1:${ORBIT_HOST_PORT:-4173}:4173"
       - "127.0.0.1:${ORBIT_VNC_HOST_PORT:-6080}:6080"

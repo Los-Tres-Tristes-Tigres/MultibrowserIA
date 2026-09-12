@@ -10,6 +10,7 @@ import type {
   ProjectState,
   ProjectSummary,
   ProviderConfig,
+  BrowserSessionMode,
 } from "../shared/types.js";
 import { AppError, idSchema, publicError } from "./validation.js";
 
@@ -22,14 +23,23 @@ async function atomicJson(file: string, value: unknown) {
 
 export class WorkspaceStore extends EventEmitter {
   readonly root: string;
+  readonly defaultBrowserSession: BrowserSessionMode;
   private projects = new Map<string, ProjectState>();
   private queues = new Map<string, Promise<void>>();
   constructor(
     root = process.env.ORBIT_WORKSPACES_DIR ||
       path.join(os.homedir(), "Orbit Workspaces"),
+    defaultBrowserSession: BrowserSessionMode = process.env
+      .ORBIT_DEFAULT_BROWSER_SESSION === "isolated"
+      ? "isolated"
+      : "shared",
   ) {
     super();
     this.root = path.resolve(root);
+    this.defaultBrowserSession = defaultBrowserSession;
+  }
+  sharedBrowserProfilePath() {
+    return path.join(this.root, "orbit-shared-browser-profile");
   }
   projectPath(id: string) {
     return path.join(this.root, idSchema.parse(id));
@@ -73,6 +83,12 @@ export class WorkspaceStore extends EventEmitter {
           const record = {
             ...state,
             ...config,
+            // Projects created before shared sessions existed keep their original isolated profile.
+            browserSession:
+              config.browserSession === "shared" ||
+              state.browserSession === "shared"
+                ? "shared"
+                : "isolated",
             browserOpen: false,
           } as BrowserAgentRecord;
           if (record.activeRunId) {
@@ -212,6 +228,7 @@ export class WorkspaceStore extends EventEmitter {
       url: string;
       preset: string;
       provider: ProviderConfig;
+      browserSession?: BrowserSessionMode;
       instructions: string;
       position?: { x: number; y: number };
     },
@@ -221,6 +238,7 @@ export class WorkspaceStore extends EventEmitter {
     const agent: BrowserAgentRecord = {
       ...input,
       id,
+      browserSession: input.browserSession ?? this.defaultBrowserSession,
       position: input.position || {
         x: 30 + project.agents.length * 80,
         y: 40 + project.agents.length * 60,
@@ -301,6 +319,7 @@ export class WorkspaceStore extends EventEmitter {
             url,
             preset,
             provider,
+            browserSession,
             position,
             instructions,
             createdAt,
@@ -310,6 +329,7 @@ export class WorkspaceStore extends EventEmitter {
             url,
             preset,
             provider,
+            browserSession,
             position,
             instructions,
             createdAt,

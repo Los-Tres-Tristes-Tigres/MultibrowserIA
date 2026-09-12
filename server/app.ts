@@ -89,6 +89,10 @@ export function createApp(
       project: store.get(projectId),
       projects,
       providers: providerInfo(),
+      browser: {
+        sharedSessionAvailable: browsers.sharedSessionAvailable,
+        defaultSession: browsers.defaultSession,
+      },
       workspacePath: store.projectPath(projectId),
     };
     res.json(payload);
@@ -110,10 +114,17 @@ export function createApp(
     res.status(201).json({ id: p.id });
   });
   app.post("/api/projects/:projectId/agents", async (req, res) => {
-    const agent = await store.addAgent(
-      req.params.projectId,
-      agentInput.parse(req.body),
-    );
+    const input = agentInput.parse(req.body);
+    const browserSession = input.browserSession ?? browsers.defaultSession;
+    if (browserSession === "shared" && !browsers.sharedSessionAvailable)
+      throw new AppError(
+        "Shared Chrome sessions are available only in local desktop mode.",
+        409,
+      );
+    const agent = await store.addAgent(req.params.projectId, {
+      ...input,
+      browserSession,
+    });
     res.status(201).json(agent);
   });
   app.patch("/api/projects/:projectId/agents/:agentId", async (req, res) => {
@@ -122,8 +133,28 @@ export function createApp(
     if (agent.activeRunId)
       throw new AppError("Stop this agent before changing its settings.", 409);
     const input = agentInput.partial().parse(req.body);
+    if (input.browserSession === "shared" && !browsers.sharedSessionAvailable)
+      throw new AppError(
+        "Shared Chrome sessions are available only in local desktop mode.",
+        409,
+      );
+    // The settings form always sends browserSession: only an actual change counts.
+    const sessionChanged =
+      input.browserSession !== undefined &&
+      input.browserSession !== agent.browserSession;
+    if (
+      sessionChanged &&
+      (agent.browserOpen || browsers.isOpening(projectId, agentId))
+    )
+      throw new AppError(
+        "Close this agent’s browser before changing its session mode.",
+        409,
+      );
     Object.assign(agent, input);
     if (input.url) agent.currentUrl = input.url;
+    if (sessionChanged)
+      agent.currentAction =
+        "Browser session changed · open browser to continue";
     await store.save(projectId);
     res.json(agent);
   });
@@ -330,13 +361,11 @@ export function createApp(
       _next: express.NextFunction,
     ) => {
       if (error instanceof ZodError) {
-        res
-          .status(400)
-          .json({
-            error: error.issues
-              .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-              .join("; "),
-          });
+        res.status(400).json({
+          error: error.issues
+            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+            .join("; "),
+        });
         return;
       }
       const status = error instanceof AppError ? error.status : 500;

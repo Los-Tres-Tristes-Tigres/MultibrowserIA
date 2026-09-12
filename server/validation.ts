@@ -37,6 +37,7 @@ export const agentInput = z
     url: webUrl,
     preset: z.string().max(30).default("custom"),
     provider: providerSchema,
+    browserSession: z.enum(["shared", "isolated"]).optional(),
     instructions: z.string().max(8000).default(""),
     position: z
       .object({ x: z.number().finite(), y: z.number().finite() })

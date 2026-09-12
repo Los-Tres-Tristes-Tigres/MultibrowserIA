@@ -132,12 +132,16 @@ export const AgentNode = memo(function AgentNode({
                 <h3>
                   {agent.browserOpen
                     ? "Connecting to browser"
-                    : "Your browser, your session"}
+                    : agent.browserSession === "shared"
+                      ? "One account, every tab"
+                      : "Your browser, your session"}
                 </h3>
                 <p>
                   {agent.browserOpen
                     ? "The next preview will appear here."
-                    : `Open ${agent.name} and sign in to get started.`}
+                    : agent.browserSession === "shared"
+                      ? `Open ${agent.name}. Sign in once across shared agents.`
+                      : `Open ${agent.name} and sign in to get started.`}
                 </p>
                 <button
                   className="button small"
@@ -250,8 +254,9 @@ export const AgentNode = memo(function AgentNode({
         </span>
         <span
           className="provider-mini"
-          title={`${agent.provider.provider} · ${agent.provider.model}`}
+          title={`${agent.browserSession === "shared" ? "Shared Orbit session" : "Independent profile"} · ${agent.provider.provider} · ${agent.provider.model}`}
         >
+          {agent.browserSession === "shared" ? "Shared" : "Private"} ·{" "}
           {agent.provider.provider === "gemini"
             ? "Gemini"
             : agent.provider.provider === "openai"
