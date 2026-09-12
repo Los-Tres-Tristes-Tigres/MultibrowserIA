@@ -7,23 +7,32 @@ export const PRESETS = [
   { id: "outlook", name: "Outlook", url: "https://outlook.live.com/mail/" },
   { id: "custom", name: "Custom Website", url: "" },
 ] as const;
+// `models` are suggestions only; each agent's model field accepts any id the key can use.
 export const PROVIDERS = [
   {
     id: "openai" as const,
     name: "OpenAI",
     envName: "OPENAI_API_KEY",
     defaultModel: "gpt-4.1",
+    models: ["gpt-4.1", "gpt-4.1-mini", "gpt-4o"],
   },
   {
     id: "openrouter" as const,
     name: "OpenRouter",
     envName: "OPENROUTER_API_KEY",
     defaultModel: "openai/gpt-4.1",
+    models: ["openai/gpt-4.1", "google/gemini-2.5-flash"],
   },
   {
     id: "gemini" as const,
     name: "Gemini / AI Studio",
     envName: "GEMINI_API_KEY",
     defaultModel: "gemini-2.5-flash",
+    models: [
+      "gemini-2.5-flash",
+      "gemini-2.5-pro",
+      "gemini-flash-latest",
+      "gemini-3-flash-preview",
+    ],
   },
 ];

@@ -1,4 +1,5 @@
 export type ProviderId = "openai" | "openrouter" | "gemini";
+export type BrowserSessionMode = "shared" | "isolated";
 export interface ProviderConfig {
   provider: ProviderId;
   model: string;
@@ -9,6 +10,7 @@ export interface ProviderInfo {
   available: boolean;
   envName: string;
   defaultModel: string;
+  models: string[];
 }
 export type AgentStatus =
   | "Idle"
@@ -54,6 +56,7 @@ export interface BrowserAgentRecord {
   url: string;
   preset: string;
   provider: ProviderConfig;
+  browserSession: BrowserSessionMode;
   position: { x: number; y: number };
   instructions: string;
   status: AgentStatus;
@@ -153,6 +156,10 @@ export interface AppSnapshot {
   project: ProjectState;
   projects: ProjectSummary[];
   providers: ProviderInfo[];
+  browser: {
+    sharedSessionAvailable: boolean;
+    defaultSession: BrowserSessionMode;
+  };
   workspacePath: string;
 }
 export interface OrbitEvent {

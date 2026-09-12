@@ -161,3 +161,68 @@ it("waits for a human clarification, rejects overlapping tasks and resumes with 
   expect(p.agents[1].chatHistory).toHaveLength(0);
   await browser.close(p.id, a.id);
 });
+
+it("stopping a run while an approval is pending performs no browser action", async () => {
+  const p = await project();
+  const before = fixtures.events.length;
+  const run = await runtime.start(
+    p.id,
+    p.agents[0].id,
+    "Create meeting",
+    p.workflows[0].id,
+  );
+  const approval = await nextApproval(p);
+  runtime.cancel(p.id, run.id);
+  await runtime.wait(run.id);
+  expect(run.status).toBe("cancelled");
+  expect(approval.status).toBe("expired");
+  await expect(runtime.decide(p.id, approval.id, true)).rejects.toThrow(
+    "already",
+  );
+  expect(fixtures.events.length).toBe(before);
+  expect(
+    await browser.session(p.id, p.agents[1].id).page.inputValue("#event-title"),
+  ).toBe("");
+  await browser.close(p.id, p.agents[0].id);
+  await browser.close(p.id, p.agents[1].id);
+});
+
+it("reports an unresolvable target to the planner without executing it, then continues", async () => {
+  const p = await project();
+  const before = fixtures.events.length;
+  const contexts: string[] = [];
+  const recovering = new AgentRuntime(store, browser, {
+    checkProvider: () => {},
+    planner: () => ({
+      next: async ({ context }) => {
+        contexts.push(context);
+        if (contexts.length === 1)
+          return {
+            kind: "act",
+            instruction: "Click missing control",
+            summary: "Click missing control",
+            impact: "read",
+            url: null,
+            data: "{}",
+          };
+        return {
+          kind: "finish",
+          instruction: "",
+          summary: "Stopped safely.",
+          impact: "read",
+          url: null,
+          data: "not json",
+        };
+      },
+    }),
+  });
+  const a = p.agents[1];
+  const run = await recovering.start(p.id, a.id, "Try a missing control");
+  await recovering.wait(run.id);
+  expect(run.status).toBe("completed");
+  expect(contexts[1]).toContain("Not executed");
+  expect(a.lastResult?.data).toEqual({ text: "not json" });
+  expect(p.approvals.filter((x) => x.runId === run.id)).toHaveLength(0);
+  expect(fixtures.events.length).toBe(before);
+  await browser.close(p.id, a.id);
+});

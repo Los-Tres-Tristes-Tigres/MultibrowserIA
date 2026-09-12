@@ -811,7 +811,7 @@ code {
   margin-left: auto;
   font-size: 10px;
   color: #637a90;
-  max-width: 88px;
+  max-width: 125px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -1291,6 +1291,14 @@ code {
 }
 .form-note.success-text {
   color: #71dca1;
+}
+.session-note {
+  margin-top: -10px;
+}
+.session-note span {
+  width: 100%;
+  padding-left: 21px;
+  color: #9fb2c6;
 }
 .optional {
   position: absolute;

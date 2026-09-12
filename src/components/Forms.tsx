@@ -1,5 +1,13 @@
 import { useState } from "react";
-import { ArrowRight, Check, Folder, Plus, Play, Trash2 } from "lucide-react";
+import {
+  ArrowRight,
+  Check,
+  Folder,
+  Plus,
+  Play,
+  Trash2,
+  Users,
+} from "lucide-react";
 import type {
   AppSnapshot,
   BrowserAgentRecord,
@@ -50,6 +58,9 @@ export function AgentForm({
     },
   );
   const [instructions, setInstructions] = useState(agent?.instructions || "");
+  const [browserSession, setBrowserSession] = useState(
+    agent?.browserSession || snapshot.browser.defaultSession,
+  );
   const [confirmDelete, setConfirmDelete] = useState(false);
   const { busy, error, submit } = useFormAction();
   const available = snapshot.providers.find((p) => p.id === provider.provider);
@@ -61,7 +72,7 @@ export function AgentForm({
           ? agentUrl(snapshot.project.id, agent.id)
           : `/projects/${snapshot.project.id}/agents`,
         agent ? "PATCH" : "POST",
-        { name, url, preset, provider, instructions },
+        { name, url, preset, provider, browserSession, instructions },
       );
       await saved();
       close();
@@ -114,6 +125,43 @@ export function AgentForm({
             />
           </label>
         </div>
+        <label>
+          Browser session
+          <select
+            value={browserSession}
+            disabled={Boolean(agent?.browserOpen || agent?.activeRunId)}
+            onChange={(e) =>
+              setBrowserSession(e.target.value as "shared" | "isolated")
+            }
+          >
+            <option
+              value="shared"
+              disabled={!snapshot.browser.sharedSessionAvailable}
+            >
+              Shared Orbit session
+            </option>
+            <option value="isolated">Independent profile</option>
+          </select>
+        </label>
+        <p className="form-note session-note">
+          {browserSession === "shared" ? (
+            <>
+              <Users size={14} /> Sign in once. Every shared agent and workspace
+              uses the same Orbit Chrome account.
+            </>
+          ) : (
+            <>
+              <Folder size={14} /> This agent keeps a separate login and browser
+              profile.
+            </>
+          )}
+          {agent?.browserOpen && (
+            <span>Close this browser before changing its session.</span>
+          )}
+          {!snapshot.browser.sharedSessionAvailable && (
+            <span>Shared Chrome is disabled in Docker.</span>
+          )}
+        </p>
         <div className="form-divider" />
         <div className="form-row">
           <label>
@@ -137,6 +185,7 @@ export function AgentForm({
             Model
             <input
               required
+              list="provider-models"
               value={provider.model}
               onChange={(e) =>
                 setProvider({ ...provider, model: e.target.value })
@@ -144,6 +193,11 @@ export function AgentForm({
               placeholder={available?.defaultModel}
             />
           </label>
+          <datalist id="provider-models">
+            {available?.models.map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
         </div>
         <p
           className={`form-note ${available?.available ? "success-text" : ""}`}
@@ -168,7 +222,7 @@ export function AgentForm({
             placeholder="Give this browser context for future tasks…"
           />
         </label>
-        {agent && (
+        {agent && browserSession === "isolated" && (
           <p className="form-note">
             <Folder size={14} />
             <span>
@@ -187,8 +241,9 @@ export function AgentForm({
           <div className="delete-confirm">
             <strong>Delete {agent?.name} and all its data?</strong>
             <p>
-              This closes its browser and permanently deletes its login session,
-              chats, logs and downloads.
+              {agent?.browserSession === "shared"
+                ? "This closes its tab and permanently deletes its chats, logs and downloads. The shared Chrome account stays signed in."
+                : "This closes its browser and permanently deletes its login session, chats, logs and downloads."}
             </p>
             <button
               type="button"

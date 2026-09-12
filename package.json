@@ -14,6 +14,7 @@
     "test": "vitest run",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "test:e2e": "playwright test",
+    "test:live": "vitest run --config vitest.live.config.ts",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {

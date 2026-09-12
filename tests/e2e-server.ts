@@ -13,7 +13,7 @@ const store = new WorkspaceStore(root);
 await store.init();
 const fixtures = await startFixtures(4175);
 const browsers = new FixtureBrowser(store, { headless: true });
-browsers.blockedPort = 4174;
+browsers.blockedPorts.add(4174);
 const runtime = new AgentRuntime(store, browsers, {
   planner: fixturePlanner,
   checkProvider: () => {},

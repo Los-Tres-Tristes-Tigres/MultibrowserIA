@@ -9,41 +9,12 @@ import { AgentRuntime } from "./runtime.js";
 import { createApp } from "./app.js";
 import { providerInfo } from "./providers.js";
 import { publicError } from "./validation.js";
+import { acquireLock, releaseLock } from "./lock.js";
 
 const store = new WorkspaceStore();
 await fs.mkdir(store.root, { recursive: true });
 const lockPath = path.join(store.root, ".orbit.lock");
-async function acquireLock() {
-  try {
-    await fs.writeFile(lockPath, String(process.pid), {
-      flag: "wx",
-      mode: 0o600,
-    });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const pid = Number(await fs.readFile(lockPath, "utf8"));
-    if (!Number.isInteger(pid) || pid <= 0)
-      throw new Error(
-        "Workspace lock is invalid. Inspect .orbit.lock before starting another process.",
-      );
-    let alive = true;
-    try {
-      process.kill(pid, 0);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ESRCH") alive = false;
-    }
-    if (alive)
-      throw new Error(
-        "Another Orbit process is using this workspace root. Stop it or choose another ORBIT_WORKSPACES_DIR.",
-      );
-    await fs.unlink(lockPath);
-    await fs.writeFile(lockPath, String(process.pid), {
-      flag: "wx",
-      mode: 0o600,
-    });
-  }
-}
-await acquireLock();
+await acquireLock(lockPath);
 const browsers = new BrowserManager(store);
 const runtime = new AgentRuntime(store, browsers);
 const { app, server, io } = createApp(store, browsers, runtime);
@@ -57,11 +28,7 @@ async function stop() {
   await vite?.close();
   io.close();
   server.close();
-  if (
-    (await fs.readFile(lockPath, "utf8").catch(() => "")) ===
-    String(process.pid)
-  )
-    await fs.unlink(lockPath);
+  await releaseLock(lockPath);
 }
 process.on("SIGINT", () => {
   void stop().finally(() => process.exit(0));
@@ -98,14 +65,24 @@ try {
     app.use(development.middlewares);
   }
   const port = Number(process.env.PORT || 4173);
-  browsers.blockedPort = port;
+  // Docker listens on 0.0.0.0 inside the container and publishes the port on the host loopback only.
+  const host = process.env.ORBIT_HOST || "127.0.0.1";
+  // Agents may never open Orbit itself or local control services such as the Docker noVNC viewer.
+  for (const value of [
+    port,
+    ...(process.env.ORBIT_BLOCKED_PORTS || "").split(","),
+  ]) {
+    const blocked = Number(value);
+    if (Number.isInteger(blocked) && blocked > 0 && blocked < 65536)
+      browsers.blockedPorts.add(blocked);
+  }
   server.once("error", (error) => {
     console.error(publicError(error));
     void stop().finally(() => process.exit(1));
   });
-  server.listen(port, "127.0.0.1", () =>
+  server.listen(port, host, () =>
     console.log(
-      `Orbit running at http://127.0.0.1:${port}\nWorkspace root: ${store.root}`,
+      `Orbit running at http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}\nWorkspace root: ${store.root}`,
     ),
   );
 } catch (error) {

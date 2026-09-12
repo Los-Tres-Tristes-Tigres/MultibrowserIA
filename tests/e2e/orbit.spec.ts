@@ -14,6 +14,8 @@ test("create, move, configure and remove a browser agent; persist the canvas", a
   await page
     .getByRole("button", { name: "Custom Website", exact: true })
     .click();
+  await expect(page.getByLabel("Browser session")).toHaveValue("shared");
+  await expect(page.getByText("Sign in once.")).toBeVisible();
   await page.getByLabel("Name", { exact: true }).fill("Docs");
   await page.getByLabel("Website URL").fill("https://example.com/");
   await page.getByLabel("AI provider").selectOption("gemini");
@@ -46,6 +48,13 @@ test("create, move, configure and remove a browser agent; persist the canvas", a
   );
   await page.getByRole("button", { name: "Settings for Docs" }).click();
   await expect(page.getByLabel("AI provider")).toHaveValue("gemini");
+  await expect(page.getByLabel("Browser session")).toHaveValue("shared");
+  // The form always sends its session mode: saving without switching it keeps the status.
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(node.locator(".node-status p")).toHaveText(
+    "Open browser to get started",
+  );
+  await page.getByRole("button", { name: "Settings for Docs" }).click();
   await page.getByRole("button", { name: "Delete agent", exact: true }).click();
   await page.getByRole("button", { name: "Delete permanently" }).click();
   await expect(

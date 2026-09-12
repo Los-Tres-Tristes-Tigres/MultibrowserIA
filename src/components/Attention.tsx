@@ -12,6 +12,14 @@ import {
 import type { ProjectState } from "../../shared/types";
 import { AppIcon } from "./Icons";
 
+const hostname = (url: string) => {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+};
+
 export function Attention({
   project,
   onDecide,
@@ -57,7 +65,8 @@ export function Attention({
             DECISIONS
           </h3>
           {decisions.map((request) => {
-            const agent = project.agents.find((a) => a.id === request.agentId)!;
+            const agent = project.agents.find((a) => a.id === request.agentId);
+            if (!agent) return null;
             return (
               <article className="decision" key={request.id}>
                 <div className="attention-agent">
@@ -68,8 +77,8 @@ export function Attention({
                   <ArrowUpRight size={15} />
                 </div>
                 <h4>{request.title}</h4>
-                <p className="decision-url">{new URL(request.url).hostname}</p>
-                <details>
+                <p className="decision-url">{hostname(request.url)}</p>
+                <details open>
                   <summary>
                     Review exact action
                     <ChevronDown size={13} />

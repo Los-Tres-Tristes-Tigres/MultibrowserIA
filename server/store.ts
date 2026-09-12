@@ -10,6 +10,7 @@ import type {
   ProjectState,
   ProjectSummary,
   ProviderConfig,
+  BrowserSessionMode,
 } from "../shared/types.js";
 import { AppError, idSchema, publicError } from "./validation.js";
 
@@ -22,14 +23,23 @@ async function atomicJson(file: string, value: unknown) {
 
 export class WorkspaceStore extends EventEmitter {
   readonly root: string;
+  readonly defaultBrowserSession: BrowserSessionMode;
   private projects = new Map<string, ProjectState>();
   private queues = new Map<string, Promise<void>>();
   constructor(
     root = process.env.ORBIT_WORKSPACES_DIR ||
       path.join(os.homedir(), "Orbit Workspaces"),
+    defaultBrowserSession: BrowserSessionMode = process.env
+      .ORBIT_DEFAULT_BROWSER_SESSION === "isolated"
+      ? "isolated"
+      : "shared",
   ) {
     super();
     this.root = path.resolve(root);
+    this.defaultBrowserSession = defaultBrowserSession;
+  }
+  sharedBrowserProfilePath() {
+    return path.join(this.root, "orbit-shared-browser-profile");
   }
   projectPath(id: string) {
     return path.join(this.root, idSchema.parse(id));
@@ -73,6 +83,12 @@ export class WorkspaceStore extends EventEmitter {
           const record = {
             ...state,
             ...config,
+            // Projects created before shared sessions existed keep their original isolated profile.
+            browserSession:
+              config.browserSession === "shared" ||
+              state.browserSession === "shared"
+                ? "shared"
+                : "isolated",
             browserOpen: false,
           } as BrowserAgentRecord;
           if (record.activeRunId) {
@@ -162,19 +178,20 @@ export class WorkspaceStore extends EventEmitter {
       messages: [],
     };
     this.projects.set(id, project);
-    await fs.mkdir(path.join(this.projectPath(id), "agents"), {
-      recursive: true,
-    });
-    await fs.mkdir(path.join(this.projectPath(id), "workflows"), {
-      recursive: true,
-    });
+    for (const dir of ["agents", "workflows"])
+      await fs.mkdir(path.join(this.projectPath(id), dir), {
+        recursive: true,
+        mode: 0o700,
+      });
     if (starter) {
+      // Site hints for the demo agents. They never bypass approvals.
       const gmail = await this.addAgent(id, {
         name: "Gmail",
         url: "https://mail.google.com/",
         preset: "gmail",
         provider,
-        instructions: "",
+        instructions:
+          "Search with the Search mail box or by navigating to https://mail.google.com/mail/u/0/#search/<URL-encoded query>. Open the matching message before extracting details. Never send, archive, delete or label mail unless the user explicitly asks.",
         position: { x: 0, y: 0 },
       });
       const calendar = await this.addAgent(id, {
@@ -182,7 +199,8 @@ export class WorkspaceStore extends EventEmitter {
         url: "https://calendar.google.com/",
         preset: "calendar",
         provider,
-        instructions: "",
+        instructions:
+          "Review a day at https://calendar.google.com/calendar/r/day/YYYY/M/D. Draft an event by navigating to https://calendar.google.com/calendar/r/eventedit?text=<title>&dates=<start>/<end>&ctz=<IANA timezone>&details=<details> with URL-encoded values and local times as YYYYMMDDTHHMMSS. Nothing is saved until Save is clicked, which needs approval; check the draft fields first. Add guests only if the user explicitly asks.",
         position: { x: 480, y: 0 },
       });
       project.connections.push({
@@ -210,6 +228,7 @@ export class WorkspaceStore extends EventEmitter {
       url: string;
       preset: string;
       provider: ProviderConfig;
+      browserSession?: BrowserSessionMode;
       instructions: string;
       position?: { x: number; y: number };
     },
@@ -219,6 +238,7 @@ export class WorkspaceStore extends EventEmitter {
     const agent: BrowserAgentRecord = {
       ...input,
       id,
+      browserSession: input.browserSession ?? this.defaultBrowserSession,
       position: input.position || {
         x: 30 + project.agents.length * 80,
         y: 40 + project.agents.length * 60,
@@ -236,6 +256,7 @@ export class WorkspaceStore extends EventEmitter {
     for (const dir of ["browser-profile", "downloads", "artifacts", "logs"])
       await fs.mkdir(path.join(this.agentPath(projectId, id), dir), {
         recursive: true,
+        mode: 0o700,
       });
     project.agents.push(agent);
     await this.save(projectId);
@@ -298,6 +319,7 @@ export class WorkspaceStore extends EventEmitter {
             url,
             preset,
             provider,
+            browserSession,
             position,
             instructions,
             createdAt,
@@ -307,6 +329,7 @@ export class WorkspaceStore extends EventEmitter {
             url,
             preset,
             provider,
+            browserSession,
             position,
             instructions,
             createdAt,
