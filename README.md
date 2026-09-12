@@ -1,6 +1,27 @@
 # Orbit · Browser Agents
 
-Local control center for independent browser agents. React Flow + React/TypeScript, Express + Socket.IO, Playwright + Stagehand 3.7.3. macOS and Windows use the same Node application.
+Orbit is a local control center for independent browser agents. Each agent works in its own browser tab or profile, can pass structured context to the next agent, and pauses for human approval before consequential external actions. The application combines React Flow + React/TypeScript, Express + Socket.IO, Playwright, and Stagehand 3.7.3; macOS and Windows run the same Node application.
+
+> Orbit is a localhost desktop MVP. It is not a hosted service or a security sandbox for arbitrary websites.
+
+## Product demo
+
+<video controls preload="metadata" width="960" poster="./design/approved-concept.png">
+  <source src="./orbit-hackathon-video/renders/orbit-hackathon-demo.mp4" type="video/mp4" />
+  Your Markdown viewer does not support HTML5 video.
+</video>
+
+If the player is not rendered by your Markdown viewer, [open or download the Orbit demo (MP4)](./orbit-hackathon-video/renders/orbit-hackathon-demo.mp4). Its source composition, storyboard, and rendering notes are in [`orbit-hackathon-video/`](./orbit-hackathon-video/).
+
+## Documentation
+
+| Guide | Covers |
+| --- | --- |
+| [Architecture](./docs/ARCHITECTURE.md) | Components, data flow, execution lifecycle, and local persistence. |
+| [Configuration](./docs/CONFIGURATION.md) | Environment variables, browser sessions, storage, and Docker settings. |
+| [Security](./docs/SECURITY.md) | Approval boundaries, data handling, network restrictions, and operating guidance. |
+| [Development](./docs/DEVELOPMENT.md) | Repository layout, scripts, verification, and contribution expectations. |
+| [Demo video](./orbit-hackathon-video/README.md) | The demo brief, source files, and rendering workflow. |
 
 ## Start
 
