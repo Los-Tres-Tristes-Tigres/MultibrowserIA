@@ -1,0 +1,22 @@
+# Orbit has no login of its own: both ports are published on the host loopback only.
+services:
+  orbit:
+    build: .
+    image: orbit-browser-agents:local
+    # Chromium profile locks record the hostname; a fixed one lets a recreated container reopen them.
+    hostname: orbit
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-UTC}
+    ports:
+      - "127.0.0.1:${ORBIT_HOST_PORT:-4173}:4173"
+      - "127.0.0.1:${ORBIT_VNC_HOST_PORT:-6080}:6080"
+    volumes:
+      - orbit-data:/data
+    shm_size: 2gb
+    stop_grace_period: 30s
+
+volumes:
+  orbit-data:

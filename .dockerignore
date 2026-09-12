@@ -1,0 +1,14 @@
+# Keep secrets, local data and build output out of the Docker build context.
+.env
+.env.*
+!.env.example
+.git
+node_modules
+dist
+test-results
+playwright-report
+.orbit-test-workspaces
+design
+*.tsbuildinfo
+npm-debug.log*
+.DS_Store
