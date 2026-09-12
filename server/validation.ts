@@ -104,8 +104,33 @@ export function publicError(error: unknown) {
     "OPENROUTER_API_KEY",
     "GEMINI_API_KEY",
   ]) {
-    const key = process.env[name];
-    if (key) message = message.split(key).join("[redacted]");
+    const key = process.env[name]?.trim();
+    if (key && key.length >= 8) message = message.split(key).join("[redacted]");
   }
-  return message.replace(/sk-[\w-]+/g, "[redacted]").slice(0, 1200);
+  return message
+    .replace(/sk-[\w-]+/g, "[redacted]")
+    .replace(/AIza[\w-]{35}/g, "[redacted]")
+    .replace(/(Bearer\s+)[\w.~+/=-]+/gi, "$1[redacted]")
+    .replace(
+      /([?&](?:key|api_key|apikey|access_token)=)[^&\s"']+/gi,
+      "$1[redacted]",
+    )
+    .slice(0, 1200);
+}
+
+/** Model output for handoffs and extraction. Malformed JSON is kept as text instead of failing a run. */
+export function structuredData(value: string): Record<string, unknown> {
+  const text = value
+    .trim()
+    .replace(/^```(?:json)?\s*([\s\S]*?)\s*```$/i, "$1")
+    .trim();
+  if (!text) return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+      return parsed as Record<string, unknown>;
+    return { value: parsed };
+  } catch {
+    return { text: text.slice(0, 8000) };
+  }
 }

@@ -137,6 +137,7 @@ export function AgentForm({
             Model
             <input
               required
+              list="provider-models"
               value={provider.model}
               onChange={(e) =>
                 setProvider({ ...provider, model: e.target.value })
@@ -144,6 +145,11 @@ export function AgentForm({
               placeholder={available?.defaultModel}
             />
           </label>
+          <datalist id="provider-models">
+            {available?.models.map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
         </div>
         <p
           className={`form-note ${available?.available ? "success-text" : ""}`}

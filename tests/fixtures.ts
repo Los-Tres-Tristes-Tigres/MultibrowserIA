@@ -54,6 +54,13 @@ export class FixtureBrowser extends BrowserManager {
     const page = this.currentPage(this.session(projectId, agentId));
     if (new URL(page.url()).hostname !== "127.0.0.1")
       throw new Error("Fixture driver is only allowed on test pages.");
+    if (instruction === "Click missing control")
+      return {
+        selector: "#missing-control",
+        method: "click",
+        description: "Missing control",
+        arguments: [],
+      };
     return instruction === "Enter event title"
       ? {
           selector: "#event-title",

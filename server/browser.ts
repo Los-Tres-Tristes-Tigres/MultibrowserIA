@@ -12,7 +12,7 @@ import { z } from "zod";
 import { WorkspaceStore } from "./store.js";
 import { stagehandClient } from "./providers.js";
 import { AppError, publicError, webUrl } from "./validation.js";
-import type { BrowserAction } from "../shared/types.js";
+import type { BrowserAction, BrowserAgentRecord } from "../shared/types.js";
 import type { TargetEvidence } from "./policy.js";
 
 export interface BrowserSession {
@@ -27,16 +27,21 @@ export interface BrowserSession {
   generation: string;
   cookieSnapshot?: string;
 }
+// Methods returned by Stagehand observe() that Orbit executes itself. Drag-and-drop and coordinate input are not supported.
 const ALLOWED_METHODS = new Set([
   "click",
+  "doubleClick",
   "fill",
   "type",
   "press",
   "selectOption",
+  "selectOptionFromDropdown",
   "check",
   "uncheck",
   "scrollTo",
   "scrollIntoView",
+  "nextChunk",
+  "prevChunk",
   "hover",
 ]);
 
@@ -44,7 +49,8 @@ export class BrowserManager {
   private sessions = new Map<string, BrowserSession>();
   private opening = new Map<string, Promise<BrowserSession>>();
   private previews = new Map<string, Buffer>();
-  blockedPort?: number;
+  /** Local ports agents must never reach: Orbit itself and, in Docker, the noVNC viewer. */
+  readonly blockedPorts = new Set<number>();
   constructor(
     readonly store: WorkspaceStore,
     private options: {
@@ -63,32 +69,55 @@ export class BrowserManager {
   validateUrl(value: string) {
     const url = new URL(webUrl.parse(value));
     if (
-      this.blockedPort &&
       ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) &&
-      Number(url.port || (url.protocol === "https:" ? 443 : 80)) ===
-        this.blockedPort
+      this.blockedPorts.has(
+        Number(url.port || (url.protocol === "https:" ? 443 : 80)),
+      )
     )
       throw new AppError(
-        "Browser agents cannot navigate to the Orbit control server.",
+        "Browser agents cannot navigate to the Orbit control server or its local services.",
       );
     return url.toString();
+  }
+  /** Last visited website, or the configured URL when the last page was internal (chrome://, about:blank). */
+  startUrl(agent: BrowserAgentRecord) {
+    try {
+      return this.validateUrl(agent.currentUrl);
+    } catch {
+      return this.validateUrl(agent.url);
+    }
   }
   async open(projectId: string, agentId: string): Promise<BrowserSession> {
     const key = this.key(projectId, agentId);
     const pending = this.opening.get(key);
     if (pending) return pending;
     const existing = this.sessions.get(key);
-    if (existing && !existing.closing) {
-      await this.currentPage(existing).bringToFront();
-      return existing;
-    }
-    const operation = this.launch(projectId, agentId);
+    const operation =
+      existing && !existing.closing
+        ? this.restore(projectId, agentId, existing)
+        : this.launch(projectId, agentId);
     this.opening.set(key, operation);
     try {
       return await operation;
     } finally {
       this.opening.delete(key);
     }
+  }
+  private async restore(
+    projectId: string,
+    agentId: string,
+    session: BrowserSession,
+  ) {
+    if (!session.context.pages().some((page) => !page.isClosed())) {
+      // Chrome keeps running after its last tab closes; bring a page back instead of failing on every open.
+      session.page = await session.context.newPage();
+      await session.page.goto(
+        this.startUrl(this.store.agent(projectId, agentId)),
+        { waitUntil: "domcontentloaded" },
+      );
+    }
+    await this.currentPage(session).bringToFront();
+    return session;
   }
   private async launch(projectId: string, agentId: string) {
     const agent = this.store.agent(projectId, agentId);
@@ -234,8 +263,19 @@ export class BrowserManager {
         void this.store.save(projectId).catch(() => {});
       });
       agent.browserOpen = true;
-      const startUrl = this.validateUrl(agent.currentUrl || agent.url);
-      await page.goto(startUrl, { waitUntil: "domcontentloaded" });
+      const startUrl = this.startUrl(agent);
+      try {
+        await page.goto(startUrl, { waitUntil: "domcontentloaded" });
+      } catch (error) {
+        // Keep the window open so the user can retry, navigate or log in manually.
+        await this.store.log(
+          projectId,
+          `Could not load ${new URL(startUrl).hostname}: ${publicError(error).split("\n")[0]}`,
+          agentId,
+          agent.activeRunId,
+          "error",
+        );
+      }
       await page.bringToFront();
       if (!agent.activeRunId) {
         agent.currentAction = "Browser ready · log in manually if needed";
@@ -287,8 +327,11 @@ export class BrowserManager {
       this.previews.set(this.key(projectId, agentId), buffer);
       await this.saveSessionCookies(projectId, agentId, session);
       const agent = this.store.agent(projectId, agentId);
-      const changed = agent.currentUrl !== page.url();
-      agent.currentUrl = page.url();
+      // Remember websites only: internal pages (chrome://, about:blank) cannot be reopened later.
+      const url = page.url();
+      const changed =
+        webUrl.safeParse(url).success && agent.currentUrl !== url;
+      if (changed) agent.currentUrl = url;
       agent.pageTitle = await page.title().catch(() => "");
       this.store.emit("preview", { projectId, agentId, timestamp: Date.now() });
       if (changed) await this.store.save(projectId);
@@ -404,57 +447,97 @@ export class BrowserManager {
       throw new AppError(
         "Action target changed or is ambiguous. Start a fresh task.",
       );
+    // Runs in the page: no named inner functions. tsx (npm run dev) wraps those in a __name helper the page lacks.
     const target = await locator.evaluate((el) => {
-      const search = el.closest("[role=search],form[role=search]");
-      const label = [
-        el.getAttribute("aria-label"),
-        el.getAttribute("placeholder"),
-        el.getAttribute("name"),
-        el.getAttribute("title"),
-        ...(el instanceof HTMLInputElement
-          ? Array.from(el.labels || []).map((l) => l.textContent)
-          : []),
-      ]
-        .filter(Boolean)
-        .join(" ");
+      const fieldSelector =
+        "input:not([type=hidden]):not([type=password]),textarea,select,[contenteditable]:not([contenteditable=false])";
+      // Logical form: an explicit form or dialog, else the nearest container with fields (formless web apps).
+      const explicit = el.closest("form,[role=dialog],[role=alertdialog]");
+      let scope: Element | null = explicit;
+      for (
+        let node = el.parentElement;
+        !scope && node && node !== document.body;
+        node = node.parentElement
+      )
+        if (node.querySelector(fieldSelector)) scope = node;
+      const nodes = scope
+        ? Array.from(scope.querySelectorAll(fieldSelector)).slice(0, 80)
+        : [];
+      // One pass describes the target and then every field.
+      const described = [el, ...nodes].map((node) => {
+        const raw =
+          node instanceof HTMLInputElement
+            ? ["checkbox", "radio"].includes(node.type)
+              ? String(node.checked)
+              : node.value
+            : node instanceof HTMLTextAreaElement ||
+                node instanceof HTMLSelectElement
+              ? node.value
+              : node.textContent || "";
+        return {
+          label: [
+            node.getAttribute("aria-label"),
+            node.getAttribute("placeholder"),
+            node.getAttribute("name"),
+            node.getAttribute("title"),
+            ...(node instanceof HTMLInputElement ||
+            node instanceof HTMLTextAreaElement ||
+            node instanceof HTMLSelectElement
+              ? Array.from(node.labels || []).map((l) => l.textContent)
+              : []),
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 300),
+          // Payment fields: detect changes without copying the value into the approval.
+          value: node.getAttribute("autocomplete")?.startsWith("cc-")
+            ? `(hidden, ${raw.length} characters)`
+            : raw.replace(/\s+/g, " ").trim().slice(0, 4000),
+        };
+      });
+      const scopeText = (scope?.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 14000);
       const tag = el.tagName.toLowerCase();
       const type = el.getAttribute("type") || "";
-      const form = el.closest("form,[role=dialog]") || el.parentElement;
-      const fields = form
-        ? Array.from(
-            form.querySelectorAll(
-              "input:not([type=password]),textarea,select,[contenteditable=true]",
-            ),
-          ).map((node) => ({
-            label: node.getAttribute("aria-label") || node.getAttribute("name"),
-            value:
-              node instanceof HTMLInputElement ||
-              node instanceof HTMLTextAreaElement ||
-              node instanceof HTMLSelectElement
-                ? node.value
-                : node.textContent,
-          }))
-        : [];
+      const label = described[0].label;
       return {
         tag,
         role: el.getAttribute("role") || "",
         type,
         label,
-        text: (el.textContent || "").slice(0, 500),
+        text: (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500),
         href: el instanceof HTMLAnchorElement ? el.href : "",
         inSearch: Boolean(
-          search ||
+          el.closest("[role=search]") ||
             type === "search" ||
             /\b(search|buscar|búsqueda)\b/i.test(label),
         ),
         editable:
           ["input", "textarea", "select"].includes(tag) ||
-          el.getAttribute("contenteditable") === "true",
-        html: el.outerHTML.slice(0, 12000),
-        formState: JSON.stringify({
-          fields,
-          text: (form?.textContent || "").slice(0, 14000),
-        }),
+          (el instanceof HTMLElement && el.isContentEditable),
+        attributes: [
+          "name",
+          "type",
+          "role",
+          "aria-label",
+          "placeholder",
+          "title",
+          "href",
+          "value",
+          "disabled",
+          "aria-disabled",
+          "aria-checked",
+          "aria-selected",
+        ]
+          .map((name) => `${name}=${el.getAttribute(name) ?? ""}`)
+          .join("|"),
+        fields: described.slice(1),
+        // Large page containers change constantly (new mail, counters); only forms, dialogs and compact containers add text.
+        formText: explicit || scopeText.length < 10000 ? scopeText : "",
       };
     });
     if (target.type === "password")
@@ -477,6 +560,9 @@ export class BrowserManager {
       case "click":
         await locator.click();
         break;
+      case "doubleClick":
+        await locator.dblclick();
+        break;
       case "fill":
         await locator.fill(arg);
         break;
@@ -493,6 +579,7 @@ export class BrowserManager {
         await locator.press(arg);
         break;
       case "selectOption":
+      case "selectOptionFromDropdown":
         await locator.selectOption(arg);
         break;
       case "check":
@@ -508,12 +595,31 @@ export class BrowserManager {
         await locator.scrollIntoViewIfNeeded();
         break;
       case "scrollTo":
-        await locator.evaluate((el, direction) => {
-          const amount = direction === "up" ? -600 : 600;
-          if (el === document.body || el === document.documentElement)
-            window.scrollBy(0, amount);
-          else el.scrollBy(0, amount);
-        }, arg);
+      case "nextChunk":
+      case "prevChunk":
+        await locator.evaluate(
+          (el, { method, value }) => {
+            const whole = el === document.body || el === document.documentElement;
+            const box = whole
+              ? document.scrollingElement || document.documentElement
+              : el;
+            // Stagehand expresses scrollTo positions as percentages ("50%").
+            const percent = /^(\d+(?:\.\d+)?)%$/.exec(value.trim());
+            if (method === "scrollTo" && percent) {
+              box.scrollTo({
+                top:
+                  ((box.scrollHeight - box.clientHeight) * Number(percent[1])) /
+                  100,
+              });
+              return;
+            }
+            const height = whole ? window.innerHeight : box.clientHeight;
+            const direction =
+              method === "prevChunk" || value === "up" ? -1 : 1;
+            box.scrollBy({ top: direction * Math.max(200, height * 0.85) });
+          },
+          { method: action.method, value: arg },
+        );
         break;
     }
     await this.currentPage(this.session(projectId, agentId)).waitForTimeout(

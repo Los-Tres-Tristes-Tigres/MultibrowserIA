@@ -9,6 +9,7 @@ export interface ProviderInfo {
   available: boolean;
   envName: string;
   defaultModel: string;
+  models: string[];
 }
 export type AgentStatus =
   | "Idle"

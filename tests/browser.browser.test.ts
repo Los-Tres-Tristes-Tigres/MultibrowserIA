@@ -6,6 +6,7 @@ import os from "node:os";
 import type { AddressInfo } from "node:net";
 import { WorkspaceStore } from "../server/store.js";
 import { BrowserManager } from "../server/browser.js";
+import { fingerprint } from "../server/policy.js";
 import type { ProjectState } from "../shared/types.js";
 import { Stagehand, AISdkClient } from "@browserbasehq/stagehand";
 import { MockLanguageModelV2 } from "ai/test";
@@ -30,6 +31,13 @@ beforeAll(async () => {
       return;
     }
     res.setHeader("Content-Type", "text/html");
+    if (req.url === "/editor") {
+      // A formless editor, like many web apps: the Save button is far from its fields.
+      res.end(
+        '<!doctype html><title>Editor fixture</title><main><div class="editor"><label>Title <input id="title" value="Demo"></label><div class="toolbar"><div><button id="save" class="idle">Save</button></div></div></div></main>',
+      );
+      return;
+    }
     res.end(
       '<!doctype html><title>Orbit browser fixture</title><h1>Meeting inbox</h1><label>Search<input type="search" id="search"></label><button id="read" onclick="document.querySelector(\'article\').textContent=\'Hackathon meeting: 2026-10-01 15:00 America/Lima, 60 minutes\'">Read meeting</button><article></article><a href="/download">Download notes</a>',
     );
@@ -184,5 +192,55 @@ describe("real Chromium browser engine", () => {
       await stagehand.close();
     }
     expect(session.page.isClosed()).toBe(false);
+  });
+  it("reopens at the configured website after an internal page or a closed last tab", async () => {
+    const b = project.agents[1];
+    await browsers.close(project.id, b.id);
+    b.currentUrl = "chrome://new-tab-page/";
+    const session = await browsers.open(project.id, b.id);
+    expect(session.page.url()).toBe(`${url}/`);
+    for (const page of session.context.pages()) await page.close();
+    const restored = await browsers.open(project.id, b.id);
+    expect(restored.page.isClosed()).toBe(false);
+    expect(restored.page.url()).toBe(`${url}/`);
+  });
+  it("fingerprints a formless editor by its field values, not by cosmetic changes", async () => {
+    const b = project.agents[1];
+    const session = await browsers.open(project.id, b.id);
+    await session.page.goto(`${url}/editor`);
+    const save = {
+      selector: "#save",
+      description: "Save",
+      method: "click",
+      arguments: [],
+    };
+    const first = await browsers.evidence(project.id, b.id, save);
+    expect(first.fields).toEqual([{ label: "Title", value: "Demo" }]);
+    await session.page
+      .locator("#save")
+      .evaluate((el) => el.classList.replace("idle", "hovered"));
+    expect(
+      fingerprint(await browsers.evidence(project.id, b.id, save)),
+    ).toBe(fingerprint(first));
+    await session.page.fill("#title", "Changed by user");
+    expect(
+      fingerprint(await browsers.evidence(project.id, b.id, save)),
+    ).not.toBe(fingerprint(first));
+  });
+  it("blocks Orbit and local control ports on every localhost name, and nothing else", () => {
+    const guard = new BrowserManager(store);
+    guard.blockedPorts.add(4173).add(6080);
+    for (const blocked of [
+      "http://127.0.0.1:4173/api/snapshot",
+      "http://localhost:6080/vnc.html",
+      "http://[::1]:4173/",
+    ])
+      expect(() => guard.validateUrl(blocked)).toThrow("Orbit");
+    expect(guard.validateUrl("http://127.0.0.1:6081/")).toBe(
+      "http://127.0.0.1:6081/",
+    );
+    expect(guard.validateUrl("https://calendar.google.com/")).toBe(
+      "https://calendar.google.com/",
+    );
   });
 });

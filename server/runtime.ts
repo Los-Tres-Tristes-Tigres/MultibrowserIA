@@ -7,17 +7,29 @@ import type {
   AgentResult,
   AgentStatus,
   ApprovalRequest,
+  BrowserAction,
   BrowserAgentRecord,
   WorkflowRun,
 } from "../shared/types.js";
 import { BrowserManager } from "./browser.js";
 import { WorkspaceStore } from "./store.js";
-import { assertProvider, createPlanner, type Planner } from "./providers.js";
-import { AppError, linearPath, publicError } from "./validation.js";
+import {
+  assertProvider,
+  createPlanner,
+  type AgentStep,
+  type Planner,
+} from "./providers.js";
+import {
+  AppError,
+  linearPath,
+  publicError,
+  structuredData,
+} from "./validation.js";
 import {
   fingerprint,
   navigationNeedsApproval,
   requiresApproval,
+  type TargetEvidence,
 } from "./policy.js";
 
 interface ActiveRun {
@@ -31,12 +43,37 @@ interface DecisionWaiter {
   resolve: (approved: boolean) => void;
 }
 const timestamp = () => new Date().toISOString();
-const jsonObject = (value: string): Record<string, unknown> => {
-  const result = JSON.parse(value);
-  if (!result || Array.isArray(result) || typeof result !== "object")
-    throw new AppError("The model returned invalid structured data.");
-  return result;
-};
+// Consecutive steps that could not be resolved (so nothing ran) before the run stops.
+const MAX_UNRESOLVED_STEPS = 3;
+function approvalDetails(
+  step: AgentStep,
+  action: BrowserAction,
+  evidence: TargetEvidence,
+) {
+  const value = action.arguments.length
+    ? ` ${action.arguments.map((item) => JSON.stringify(item)).join(", ")}`
+    : "";
+  const lines = [
+    `Action: ${action.method}${value}`,
+    `Instruction: ${step.instruction}`,
+    `Target: ${evidence.label || evidence.text || action.description || evidence.tag}`,
+    `Page: ${evidence.url}`,
+  ];
+  if (evidence.fields.length)
+    lines.push(
+      "",
+      "Form fields right now:",
+      ...evidence.fields
+        .slice(0, 30)
+        .map(
+          (field) =>
+            `• ${field.label || "Unlabeled field"}: ${field.value.slice(0, 300) || "(empty)"}`,
+        ),
+    );
+  if (evidence.formText)
+    lines.push("", `Form text: ${evidence.formText.slice(0, 1500)}`);
+  return lines.join("\n");
+}
 
 export class AgentRuntime {
   private active = new Map<string, ActiveRun>();
@@ -77,7 +114,14 @@ export class AgentRuntime {
       const a = this.store.agent(projectId, id);
       if (a.activeRunId)
         throw new AppError(`${a.name} already has an active task.`, 409);
-      (this.dependencies.checkProvider || assertProvider)(a.provider);
+      try {
+        (this.dependencies.checkProvider || assertProvider)(a.provider);
+      } catch (error) {
+        // Each node has its own provider: name the one that is not ready.
+        throw error instanceof AppError
+          ? new AppError(`${a.name}: ${error.message}`, error.status)
+          : error;
+      }
     }
     const run: WorkflowRun = {
       id: randomUUID(),
@@ -279,6 +323,28 @@ export class AgentRuntime {
     this.check(signal);
     await this.store.log(projectId, `${agent.name} started`, agent.id, run.id);
     const observations: string[] = [];
+    let unresolved = 0;
+    // A step that fails before anything runs goes back to the planner. Cancellation, closed browsers
+    // and manual-login requests (409) still stop the run, as do repeated failures.
+    const skip = async (step: AgentStep, error: unknown) => {
+      if (
+        signal.aborted ||
+        (error instanceof AppError && error.status === 409) ||
+        ++unresolved > MAX_UNRESOLVED_STEPS
+      )
+        throw error;
+      const reason = publicError(error);
+      observations.push(
+        `Not executed: "${step.instruction}" could not be resolved (${reason}). Choose a more specific target, a different approach, or ask the user.`,
+      );
+      await this.store.log(
+        projectId,
+        `Nothing executed for "${step.summary || step.instruction}": ${reason}`,
+        agent.id,
+        run.id,
+        "error",
+      );
+    };
     const configured = Number(process.env.ORBIT_MAX_STEPS || 30);
     const maxSteps =
       this.dependencies.maxSteps ||
@@ -319,7 +385,7 @@ export class AgentRuntime {
         const result: AgentResult = {
           type: "browser_result",
           summary: step.summary,
-          data: jsonObject(step.data),
+          data: structuredData(step.data),
           sourceUrl: agent.currentUrl,
         };
         agent.lastResult = result;
@@ -386,14 +452,22 @@ export class AgentRuntime {
       }
       if (step.kind === "extract") {
         await this.status(projectId, agent, "Reading", step.summary);
-        const extracted = await this.browsers.extract(
-          projectId,
-          agent.id,
-          step.instruction,
-        );
+        let extracted: Awaited<ReturnType<BrowserManager["extract"]>>;
+        try {
+          extracted = await this.browsers.extract(
+            projectId,
+            agent.id,
+            step.instruction,
+          );
+        } catch (error) {
+          await skip(step, error);
+          continue;
+        }
         this.check(signal);
-        jsonObject(extracted.data);
-        observations.push(`Extracted: ${JSON.stringify(extracted)}`);
+        unresolved = 0;
+        observations.push(
+          `Extracted: ${JSON.stringify({ summary: extracted.summary, data: structuredData(extracted.data) })}`,
+        );
         await this.store.log(
           projectId,
           `Extracted: ${extracted.summary}`,
@@ -403,8 +477,14 @@ export class AgentRuntime {
         continue;
       }
       if (step.kind === "navigate") {
-        if (!step.url) throw new AppError("Navigation requires a URL.");
-        const url = this.browsers.validateUrl(step.url);
+        let url: string;
+        try {
+          if (!step.url) throw new AppError("Navigation requires a URL.");
+          url = this.browsers.validateUrl(step.url);
+        } catch (error) {
+          await skip(step, error);
+          continue;
+        }
         if (navigationNeedsApproval(url, step.impact)) {
           const session = this.browsers.session(projectId, agent.id);
           const before =
@@ -417,7 +497,7 @@ export class AgentRuntime {
             { method: "goto", url },
             hash,
             step.summary,
-            step.instruction,
+            `Action: open ${url}\nInstruction: ${step.instruction}\nFrom page: ${this.browsers.currentPage(session).url()}`,
             signal,
           );
           this.check(signal);
@@ -438,26 +518,26 @@ export class AgentRuntime {
         await this.browsers.navigate(projectId, agent.id, url);
         this.check(signal);
       } else {
-        const action = await this.browsers.resolve(
-          projectId,
-          agent.id,
-          step.instruction,
-        );
-        this.check(signal);
-        const evidence = await this.browsers.evidence(
-          projectId,
-          agent.id,
-          action,
-        );
-        this.check(signal);
-        if (evidence.href) this.browsers.validateUrl(evidence.href);
+        let action: BrowserAction;
+        let evidence: TargetEvidence;
+        try {
+          action = await this.browsers.resolve(
+            projectId,
+            agent.id,
+            step.instruction,
+          );
+          this.check(signal);
+          evidence = await this.browsers.evidence(projectId, agent.id, action);
+          this.check(signal);
+          if (evidence.href) this.browsers.validateUrl(evidence.href);
+        } catch (error) {
+          await skip(step, error);
+          continue;
+        }
         const hash = fingerprint(evidence);
         if (requiresApproval(step, action, evidence)) {
           await this.browsers.capture(projectId, agent.id);
           this.check(signal);
-          const values = action.arguments.length
-            ? `\nValue: ${action.arguments.join(", ")}`
-            : "";
           await this.approve(
             projectId,
             agent,
@@ -465,7 +545,7 @@ export class AgentRuntime {
             action,
             hash,
             step.summary,
-            `${step.instruction}${values}\nPage: ${evidence.url}\nTarget: ${evidence.label || evidence.text || action.description}\nForm: ${evidence.formState.slice(0, 6000)}`,
+            approvalDetails(step, action, evidence),
             signal,
           );
           this.check(signal);
@@ -492,6 +572,7 @@ export class AgentRuntime {
         await this.browsers.execute(projectId, agent.id, action);
         this.check(signal);
       }
+      unresolved = 0;
       observations.push(`Executed: ${step.summary}`);
       await this.store.log(projectId, step.summary, agent.id, run.id);
     }

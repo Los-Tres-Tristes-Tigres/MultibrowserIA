@@ -189,11 +189,12 @@ export function createApp(
       if (!artifact) throw new AppError("Artifact not found.", 404);
       const base = store.agentPath(projectId, agentId);
       const file = path.resolve(base, artifact.relativePath);
-      if (
-        !file.startsWith(base + path.sep) ||
-        (await fs.lstat(file)).isSymbolicLink()
-      )
+      if (!file.startsWith(base + path.sep))
         throw new AppError("Invalid artifact path.", 403);
+      // Never echo filesystem errors: they contain absolute local paths.
+      const stat = await fs.lstat(file).catch(() => null);
+      if (!stat) throw new AppError("Artifact file is missing.", 404);
+      if (!stat.isFile()) throw new AppError("Invalid artifact path.", 403);
       res.download(file, artifact.name);
     },
   );
@@ -338,9 +339,11 @@ export function createApp(
           });
         return;
       }
-      res
-        .status(error instanceof AppError ? error.status : 500)
-        .json({ error: publicError(error) });
+      const status = error instanceof AppError ? error.status : 500;
+      // Unexpected failures are logged locally, redacted like every public message.
+      if (status >= 500)
+        console.error("Orbit request failed:", publicError(error));
+      res.status(status).json({ error: publicError(error) });
     },
   );
   return { app, server, io };
