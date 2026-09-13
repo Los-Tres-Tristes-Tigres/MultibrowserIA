@@ -870,6 +870,26 @@ code {
 .node-chat {
   height: 100%;
 }
+.node-context {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px 8px;
+  gap: 6px;
+}
+.context-hint,
+.context-status {
+  font-size: 10px;
+  line-height: 1.45;
+  color: #7b93a9;
+}
+.context-editor {
+  flex: 1;
+  min-height: 120px;
+  resize: none;
+  font-size: 11px;
+  line-height: 1.55;
+}
 .chat-empty {
   padding: 19px 5px;
   text-align: center;

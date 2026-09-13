@@ -42,7 +42,8 @@ export function AgentForm({
   const [name, setName] = useState(agent?.name || "Gmail");
   const [url, setUrl] = useState(agent?.url || "https://mail.google.com/");
   const initialProvider =
-    snapshot.providers.find((p) => p.available) || snapshot.providers[0];
+    snapshot.providers.find((p) => p.id === "openrouter") ||
+    snapshot.providers[0];
   const [provider, setProvider] = useState<ProviderConfig>(
     agent?.provider || {
       provider: initialProvider.id,
@@ -125,7 +126,7 @@ export function AgentForm({
                 setProvider({ provider: next.id, model: next.defaultModel });
               }}
             >
-              {snapshot.providers.map((p) => (
+              {snapshot.providers.filter((p) => p.id === "openrouter").map((p) => (
                 <option value={p.id} key={p.id}>
                   {p.name}
                   {p.available ? "" : " · key missing"}
@@ -138,9 +139,7 @@ export function AgentForm({
             <input
               required
               value={provider.model}
-              onChange={(e) =>
-                setProvider({ ...provider, model: e.target.value })
-              }
+              readOnly
               placeholder={available?.defaultModel}
             />
           </label>
@@ -150,7 +149,7 @@ export function AgentForm({
         >
           {available?.available ? (
             <>
-              <Check size={14} /> Provider key is configured.
+              <Check size={14} /> OpenRouter is pinned to openrouter/free for this demo.
             </>
           ) : (
             <>
@@ -172,7 +171,7 @@ export function AgentForm({
           <p className="form-note">
             <Folder size={14} />
             <span>
-              Independent profile, chat and downloads.
+              Shared workspace browser session; independent chat and downloads.
               <br />
               <code>agents/{agent.id}/</code>
             </span>
@@ -474,13 +473,15 @@ export function SettingsDialog({
   return (
     <Modal title="Workspace settings" close={close}>
       <div className="stack-form">
-        <h3>Model providers</h3>
+        <h3>Demo model</h3>
         <p className="muted">
-          Choose a provider and model inside each agent’s settings. Keys are
-          read only by the local server.
+          Every agent is pinned to OpenRouter <code>openrouter/free</code>.
+          Keys are read only by the local server.
         </p>
         <div className="provider-list">
-          {snapshot.providers.map((p) => (
+          {snapshot.providers
+            .filter((p) => p.id === "openrouter")
+            .map((p) => (
             <div key={p.id}>
               <div>
                 <strong>{p.name}</strong>
@@ -490,17 +491,18 @@ export function SettingsDialog({
                 {p.available ? "Connected" : "Not configured"}
               </span>
             </div>
-          ))}
+            ))}
         </div>
         <p className="form-note">
-          Configure keys in the project’s <code>.env</code> file and restart
-          Orbit. Never enter passwords or API keys in an agent chat.
+          Configure <code>OPENROUTER_API_KEY</code> in a local <code>.env</code>
+          file and restart Orbit. Never enter passwords or API keys in an
+          agent chat.
         </p>
         <h3>Workspace folder</h3>
         <code className="path-display">{snapshot.workspacePath}</code>
         <p className="form-note">
           Browser profiles, chats and files stay in this folder. Page content
-          needed for a task is sent to that agent’s selected AI provider.
+          needed for a task is sent to OpenRouter.
         </p>
         <footer className="form-actions">
           <button className="button primary" onClick={close}>

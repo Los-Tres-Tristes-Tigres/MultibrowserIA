@@ -56,6 +56,8 @@ export interface BrowserAgentRecord {
   provider: ProviderConfig;
   position: { x: number; y: number };
   instructions: string;
+  lastChannel?: string;
+  lastThread?: string;
   status: AgentStatus;
   currentAction: string;
   currentUrl: string;
@@ -98,6 +100,12 @@ export interface BrowserAction {
   method: string;
   arguments: string[];
 }
+export interface SlackPostAction {
+  method: "post_to_slack";
+  channel: string;
+  text: string;
+  threadTs?: string;
+}
 export interface ApprovalRequest {
   id: string;
   agentId: string;
@@ -105,7 +113,7 @@ export interface ApprovalRequest {
   title: string;
   description: string;
   url: string;
-  action: BrowserAction | { method: "goto"; url: string };
+  action: BrowserAction | { method: "goto"; url: string } | SlackPostAction;
   fingerprint: string;
   status: "pending" | "approved" | "rejected" | "expired";
   createdAt: string;

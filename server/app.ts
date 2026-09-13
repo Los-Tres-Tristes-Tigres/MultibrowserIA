@@ -101,11 +101,9 @@ export function createApp(
       })
       .strict()
       .parse(req.body);
-    const available =
-      providerInfo().find((p) => p.available) || providerInfo()[0];
     const p = await store.create(body.name, body.starter, {
-      provider: available.id,
-      model: available.defaultModel,
+      provider: "openrouter",
+      model: "openrouter/free",
     });
     res.status(201).json({ id: p.id });
   });
@@ -119,10 +117,15 @@ export function createApp(
   app.patch("/api/projects/:projectId/agents/:agentId", async (req, res) => {
     const { projectId, agentId } = req.params;
     const agent = store.agent(projectId, agentId);
-    if (agent.activeRunId)
-      throw new AppError("Stop this agent before changing its settings.", 409);
     const input = agentInput.partial().parse(req.body);
+    const keys = Object.keys(input);
+    const contextOnly = keys.every((key) =>
+      ["instructions", "lastChannel", "lastThread"].includes(key),
+    );
+    if (agent.activeRunId && !contextOnly)
+      throw new AppError("Stop this agent before changing its settings.", 409);
     Object.assign(agent, input);
+    agent.provider = { provider: "openrouter", model: "openrouter/free" };
     if (input.url) agent.currentUrl = input.url;
     await store.save(projectId);
     res.json(agent);

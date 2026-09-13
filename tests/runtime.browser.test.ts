@@ -161,3 +161,73 @@ it("waits for a human clarification, rejects overlapping tasks and resumes with 
   expect(p.agents[1].chatHistory).toHaveLength(0);
   await browser.close(p.id, a.id);
 });
+
+it("requires approval before a Slack post and only sends the approved message", async () => {
+  const p = await store.create("Slack approval test");
+  const slack = await store.addAgent(p.id, {
+    name: "Slack",
+    preset: "slack",
+    url: `${fixtures.url}/inbox`,
+    instructions: "",
+    provider: { provider: "openrouter", model: "openrouter/free" },
+  });
+  slack.currentUrl = slack.url;
+  await store.save(p.id);
+  const posted: Array<{ channel: string; text: string; threadTs?: string }> =
+    [];
+  const slackRuntime = new AgentRuntime(store, browser, {
+    checkProvider: () => {},
+    planner: () => {
+      let step = 0;
+      return {
+        next: async () => {
+          if (++step === 1)
+            return {
+              kind: "post_to_slack" as const,
+              instruction: "Demo ready",
+              url: "#informal",
+              impact: "external" as const,
+              summary: "Post the demo update",
+              data: "{}",
+            };
+          return {
+            kind: "finish" as const,
+            instruction: "",
+            url: null,
+            impact: "read" as const,
+            summary: "Slack update sent.",
+            data: "{}",
+          };
+        },
+      };
+    },
+    postToSlack: async (channel, text, threadTs) => {
+      posted.push({ channel, text, threadTs });
+      return { channel, ts: "123.456" };
+    },
+  });
+
+  const rejected = await slackRuntime.start(p.id, slack.id, "Post demo update");
+  const rejectedApproval = await nextApproval(p);
+  expect(rejectedApproval.action).toEqual({
+    method: "post_to_slack",
+    channel: "#informal",
+    text: "Demo ready",
+  });
+  expect(posted).toEqual([]);
+  await slackRuntime.decide(p.id, rejectedApproval.id, false);
+  await slackRuntime.wait(rejected.id);
+  expect(rejected.status).toBe("cancelled");
+  expect(posted).toEqual([]);
+
+  const accepted = await slackRuntime.start(p.id, slack.id, "Post demo update");
+  const acceptedApproval = await nextApproval(p);
+  await slackRuntime.decide(p.id, acceptedApproval.id, true);
+  await slackRuntime.wait(accepted.id);
+  expect(accepted.status).toBe("completed");
+  expect(posted).toEqual([
+    { channel: "#informal", text: "Demo ready", threadTs: undefined },
+  ]);
+  await browser.close(p.id, slack.id);
+  await slackRuntime.shutdown();
+});

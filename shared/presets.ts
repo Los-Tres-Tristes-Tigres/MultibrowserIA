@@ -18,7 +18,7 @@ export const PROVIDERS = [
     id: "openrouter" as const,
     name: "OpenRouter",
     envName: "OPENROUTER_API_KEY",
-    defaultModel: "openai/gpt-4.1",
+    defaultModel: "openrouter/free",
   },
   {
     id: "gemini" as const,

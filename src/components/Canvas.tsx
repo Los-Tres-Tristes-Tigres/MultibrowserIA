@@ -39,6 +39,7 @@ interface CanvasProps {
   onBrowser(id: string): void;
   onSettings(id: string): void;
   onChat(id: string, text: string): Promise<void>;
+  onSaveContext(id: string, instructions: string): Promise<void>;
   onStop(id: string): void;
   onAdd(): void;
   refresh(): Promise<void>;
@@ -68,6 +69,8 @@ function CanvasInner(props: CanvasProps) {
     onBrowser: (id: string) => callbacks.current.onBrowser(id),
     onSettings: (id: string) => callbacks.current.onSettings(id),
     onChat: (id: string, text: string) => callbacks.current.onChat(id, text),
+    onSaveContext: (id: string, instructions: string) =>
+      callbacks.current.onSaveContext(id, instructions),
     onStop: (id: string) => callbacks.current.onStop(id),
   }).current;
   useEffect(() => {

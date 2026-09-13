@@ -12,8 +12,14 @@ import type {
 } from "../shared/types.js";
 import { BrowserManager } from "./browser.js";
 import { WorkspaceStore } from "./store.js";
-import { assertProvider, createPlanner, type Planner } from "./providers.js";
+import {
+  assertProvider,
+  createPlanner,
+  type AgentStep,
+  type Planner,
+} from "./providers.js";
 import { AppError, linearPath, publicError } from "./validation.js";
+import { formatHits, postToSlack, research, searchWeb } from "./tigre.js";
 import {
   fingerprint,
   navigationNeedsApproval,
@@ -48,6 +54,7 @@ export class AgentRuntime {
       planner?: (agent: BrowserAgentRecord) => Planner;
       checkProvider?: (config: BrowserAgentRecord["provider"]) => void;
       maxSteps?: number;
+      postToSlack?: typeof postToSlack;
     } = {},
   ) {
     store.on(
@@ -268,12 +275,8 @@ export class AgentRuntime {
     const signal = active.controller.signal;
     const planner =
       this.dependencies.planner?.(agent) || createPlanner(agent.provider);
-    this.chat(
-      agent,
-      "user",
-      incoming ? incoming.instruction : run.instruction,
-      run.id,
-    );
+    const task = incoming ? incoming.instruction : run.instruction;
+    this.chat(agent, "user", task, run.id);
     await this.status(projectId, agent, "Navigating", "Opening browser");
     await this.browsers.open(projectId, agent.id);
     this.check(signal);
@@ -295,11 +298,21 @@ export class AgentRuntime {
         `Choosing action · step ${stepNumber}/${maxSteps}`,
       );
       const context = JSON.stringify({
+        permanentContext: agent.instructions || "",
         agent: {
           name: agent.name,
           initialUrl: agent.url,
+          preset: agent.preset,
           instructions: agent.instructions,
         },
+        slackAssist:
+          agent.preset === "slack"
+            ? {
+                lastChannel: agent.lastChannel || null,
+                lastThread: agent.lastThread || null,
+                tools: ["search_web", "ask_tigre", "post_to_slack"],
+              }
+            : null,
         currentTime: timestamp(),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         task: incoming ? incoming.instruction : run.instruction,
@@ -313,7 +326,22 @@ export class AgentRuntime {
           .map((m) => ({ role: m.role, text: m.text })),
         observableResults: observations.slice(-18),
       });
-      const step = await planner.next({ context, pageText, signal });
+      let step: AgentStep;
+      try {
+        step = await planner.next({ context, pageText, signal });
+      } catch (error) {
+        const message = publicError(error);
+        step = {
+          kind: "finish",
+          instruction: "Recovered after planner failure",
+          url: null,
+          impact: "read",
+          summary: /object generated|parse the response/i.test(message)
+            ? "El modelo no devolvió un paso válido. Pregunta una sola cosa: o la web, o esta pestaña, o publicar. No las tres juntas."
+            : message,
+          data: "{}",
+        };
+      }
       this.check(signal);
       if (step.kind === "finish") {
         const result: AgentResult = {
@@ -382,6 +410,94 @@ export class AgentRuntime {
       if (step.kind === "wait") {
         await this.status(projectId, agent, "Waiting", step.summary);
         await delay(1500, undefined, { signal });
+        continue;
+      }
+      if (
+        step.kind === "search_web" ||
+        step.kind === "ask_tigre" ||
+        step.kind === "post_to_slack"
+      ) {
+        await this.status(projectId, agent, "Reading", step.summary);
+        if (step.kind === "search_web") {
+          const hits = await searchWeb(step.instruction);
+          const formatted = formatHits(hits);
+          observations.push(`search_web: ${formatted}`);
+          await this.store.log(
+            projectId,
+            `Exa search: ${step.instruction}`,
+            agent.id,
+            run.id,
+          );
+        } else if (step.kind === "ask_tigre") {
+          const answer = await research(
+            step.instruction,
+            [
+              agent.lastChannel ? `channel ${agent.lastChannel}` : "",
+              agent.lastThread ? `thread ${agent.lastThread}` : "",
+            ]
+              .filter(Boolean)
+              .join(" · "),
+          );
+          observations.push(`ask_tigre: ${answer}`);
+          this.chat(agent, "assistant", answer, run.id);
+          await this.store.log(
+            projectId,
+            `Tigre: ${step.instruction}`,
+            agent.id,
+            run.id,
+            "success",
+          );
+        } else {
+          const channel =
+            step.url ||
+            agent.lastChannel ||
+            (step.instruction.match(/#[\w-]+/) || [])[0];
+          if (!channel)
+            throw new AppError(
+              "post_to_slack needs a channel like #informal in url.",
+            );
+          const text = (step.instruction || step.summary).trim();
+          if (!text)
+            throw new AppError("post_to_slack needs a message to send.");
+          const action = {
+            method: "post_to_slack" as const,
+            channel,
+            text,
+            ...(agent.lastThread ? { threadTs: agent.lastThread } : {}),
+          };
+          const hash = createHash("sha256")
+            .update(JSON.stringify(action))
+            .digest("hex");
+          await this.approve(
+            projectId,
+            agent,
+            run,
+            action,
+            hash,
+            `Post to ${channel}`,
+            `Channel: ${channel}\nMessage:\n${text}`,
+            signal,
+          );
+          this.check(signal);
+          const posted = await (this.dependencies.postToSlack || postToSlack)(
+            channel,
+            text,
+            agent.lastThread,
+          );
+          agent.lastChannel = channel;
+          agent.lastThread = posted.ts;
+          observations.push(
+            `Posted to Slack ${channel} (${posted.ts}): ${step.summary}`,
+          );
+          await this.store.log(
+            projectId,
+            `Posted to Slack ${channel}`,
+            agent.id,
+            run.id,
+            "success",
+          );
+        }
+        await this.store.save(projectId);
         continue;
       }
       if (step.kind === "extract") {

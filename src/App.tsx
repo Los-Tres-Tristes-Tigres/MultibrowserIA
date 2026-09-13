@@ -77,6 +77,9 @@ export function App() {
       api(`${agentUrl(project.id, id)}/messages`, "POST", { text }),
     );
   };
+  const onSaveContext = async (id: string, instructions: string) => {
+    await api(`${agentUrl(project.id, id)}`, "PATCH", { instructions });
+  };
   const stop = (runId: string) => {
     void orbit
       .perform(() =>
@@ -245,6 +248,7 @@ export function App() {
           onBrowser={(id) => void openBrowser(id)}
           onSettings={(id) => setDialog({ type: "agent", id })}
           onChat={onChat}
+          onSaveContext={onSaveContext}
           onStop={stop}
           onAdd={() => setDialog({ type: "agent" })}
           refresh={orbit.refresh}

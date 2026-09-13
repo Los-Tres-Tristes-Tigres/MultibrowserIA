@@ -14,6 +14,10 @@ import type {
 import { AppError, idSchema, publicError } from "./validation.js";
 
 const now = () => new Date().toISOString();
+const demoProvider: ProviderConfig = {
+  provider: "openrouter",
+  model: "openrouter/free",
+};
 async function atomicJson(file: string, value: unknown) {
   const temp = `${file}.${randomUUID()}.tmp`;
   await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
@@ -75,6 +79,7 @@ export class WorkspaceStore extends EventEmitter {
             ...config,
             browserOpen: false,
           } as BrowserAgentRecord;
+          record.provider = { ...demoProvider };
           if (record.activeRunId) {
             record.status = "Idle";
             record.currentAction =
@@ -135,7 +140,7 @@ export class WorkspaceStore extends EventEmitter {
   async create(
     name: string,
     starter = false,
-    provider: ProviderConfig = { provider: "openai", model: "gpt-4.1" },
+    provider: ProviderConfig = demoProvider,
   ) {
     const slug =
       name
@@ -185,6 +190,15 @@ export class WorkspaceStore extends EventEmitter {
         instructions: "",
         position: { x: 480, y: 0 },
       });
+      await this.addAgent(id, {
+        name: "Slack",
+        url: "https://app.slack.com/",
+        preset: "slack",
+        provider,
+        instructions:
+          "Eres el researcher del equipo en Slack. Lee este contexto antes de cada acción. Antes de escribir hechos, usa search_web o ask_tigre (Exa). Recuerda el canal y el hilo actuales. El navegador de Slack sigue siendo el camino principal para leer la UI.",
+        position: { x: 960, y: 0 },
+      });
       project.connections.push({
         id: randomUUID(),
         source: gmail.id,
@@ -211,6 +225,8 @@ export class WorkspaceStore extends EventEmitter {
       preset: string;
       provider: ProviderConfig;
       instructions: string;
+      lastChannel?: string;
+      lastThread?: string;
       position?: { x: number; y: number };
     },
   ) {
@@ -218,6 +234,7 @@ export class WorkspaceStore extends EventEmitter {
     const id = randomUUID();
     const agent: BrowserAgentRecord = {
       ...input,
+      provider: { ...demoProvider },
       id,
       position: input.position || {
         x: 30 + project.agents.length * 80,
@@ -300,6 +317,8 @@ export class WorkspaceStore extends EventEmitter {
             provider,
             position,
             instructions,
+            lastChannel,
+            lastThread,
             createdAt,
           }) => ({
             id,
@@ -309,6 +328,8 @@ export class WorkspaceStore extends EventEmitter {
             provider,
             position,
             instructions,
+            lastChannel,
+            lastThread,
             createdAt,
           }),
         );

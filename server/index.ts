@@ -1,5 +1,5 @@
-import "dotenv/config";
 import path from "node:path";
+import { config as loadEnv } from "dotenv";
 import { promises as fs } from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -7,8 +7,10 @@ import { WorkspaceStore } from "./store.js";
 import { BrowserManager } from "./browser.js";
 import { AgentRuntime } from "./runtime.js";
 import { createApp } from "./app.js";
-import { providerInfo } from "./providers.js";
 import { publicError } from "./validation.js";
+
+loadEnv({ path: path.resolve(process.cwd(), ".env") });
+loadEnv({ path: path.resolve(process.cwd(), "../.env") });
 
 const store = new WorkspaceStore();
 await fs.mkdir(store.root, { recursive: true });
@@ -72,10 +74,9 @@ process.on("SIGTERM", () => {
 try {
   await store.init();
   if (!store.list().length) {
-    const p = providerInfo().find((p) => p.available) || providerInfo()[0];
     await store.create("Hackathon Ops", true, {
-      provider: p.id,
-      model: p.defaultModel,
+      provider: "openrouter",
+      model: "openrouter/free",
     });
   }
   const production = process.argv.includes("--production");

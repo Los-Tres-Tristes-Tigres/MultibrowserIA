@@ -4,6 +4,7 @@ import {
   AppWindow,
   MessageSquare,
   FileText,
+  StickyNote,
   MoreHorizontal,
   ExternalLink,
   LockKeyhole,
@@ -24,6 +25,7 @@ export type AgentNodeData = {
   onBrowser(id: string): void;
   onSettings(id: string): void;
   onChat(id: string, text: string): Promise<void>;
+  onSaveContext(id: string, instructions: string): Promise<void>;
   onStop(id: string): void;
 } & Record<string, unknown>;
 export type FlowAgentNode = Node<AgentNodeData, "browserAgent">;
@@ -36,9 +38,14 @@ export const AgentNode = memo(function AgentNode({
   const { agent, projectId } = data;
   const [tab, setTab] = useState("Browser");
   const [text, setText] = useState("");
+  const [context, setContext] = useState(data.agent.instructions);
+  const [contextSaved, setContextSaved] = useState(true);
   const [sending, setSending] = useState(false);
   const [imageError, setImageError] = useState(false);
   const history = useRef<HTMLDivElement>(null);
+  const contextTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
   useEffect(() => {
     if (data.selectedTab) setTab(data.selectedTab);
   }, [data.selectedTab]);
@@ -49,6 +56,11 @@ export const AgentNode = memo(function AgentNode({
     () => setImageError(false),
     [data.previewVersion, agent.browserOpen],
   );
+  useEffect(() => {
+    setContext(agent.instructions);
+    setContextSaved(true);
+  }, [agent.id, agent.instructions]);
+  useEffect(() => () => clearTimeout(contextTimer.current), []);
   const send = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!text.trim() || sending) return;
@@ -61,6 +73,17 @@ export const AgentNode = memo(function AgentNode({
     } finally {
       setSending(false);
     }
+  };
+  const saveContext = (value: string) => {
+    setContext(value);
+    setContextSaved(false);
+    clearTimeout(contextTimer.current);
+    contextTimer.current = setTimeout(() => {
+      void data
+        .onSaveContext(agent.id, value)
+        .then(() => setContextSaved(true))
+        .catch(() => setContextSaved(false));
+    }, 400);
   };
   const active = Boolean(agent.activeRunId);
   const canSend = !active || agent.waitingForReply;
@@ -206,6 +229,29 @@ export const AgentNode = memo(function AgentNode({
             </form>
           </div>
         )}
+        {tab === "Context" && (
+          <div className="node-context">
+            <p className="context-hint">
+              El agente lee esto antes de cada acción.
+              {agent.preset === "slack" && agent.lastChannel
+                ? ` Canal: ${agent.lastChannel}`
+                : ""}
+              {agent.preset === "slack"
+                ? " Las publicaciones requieren aprobación en Attention."
+                : ""}
+            </p>
+            <textarea
+              className="context-editor"
+              aria-label={`Context for ${agent.name}`}
+              placeholder="Prompt permanente de esta caja…"
+              value={context}
+              onChange={(event) => saveContext(event.target.value)}
+            />
+            <span className="context-status">
+              {contextSaved ? "Guardado" : "Guardando…"}
+            </span>
+          </div>
+        )}
         {tab === "Logs" && (
           <div className="node-logs">
             <div className="log-heading">BROWSER ACTIVITY</div>
@@ -264,6 +310,7 @@ export const AgentNode = memo(function AgentNode({
         {[
           { name: "Chat", Icon: MessageSquare },
           { name: "Browser", Icon: AppWindow },
+          { name: "Context", Icon: StickyNote },
           { name: "Logs", Icon: FileText },
         ].map(({ name, Icon }) => (
           <button

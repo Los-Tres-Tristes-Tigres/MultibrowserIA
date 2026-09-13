@@ -7,6 +7,7 @@ import type { AddressInfo } from "node:net";
 import { WorkspaceStore } from "../server/store.js";
 import { BrowserManager } from "../server/browser.js";
 import type { ProjectState } from "../shared/types.js";
+import { chromium } from "playwright";
 import { Stagehand, AISdkClient } from "@browserbasehq/stagehand";
 import { MockLanguageModelV2 } from "ai/test";
 
@@ -57,21 +58,22 @@ afterAll(async () => {
   if (root) await fs.rm(root, { recursive: true, force: true });
 });
 describe("real Chromium browser engine", () => {
-  it("opens independent profiles, reads, clicks, types, captures and downloads into the right agent folder", async () => {
+  it("shares one workspace profile while keeping browser work and downloads assigned to each agent", async () => {
     const [a, b] = project.agents;
     const first = await browsers.open(project.id, a.id);
     const second = await browsers.open(project.id, b.id);
-    expect(first.cdpUrl).not.toBe(second.cdpUrl);
+    expect(first.cdpUrl).toBe(second.cdpUrl);
     await first.context.addCookies([
       { name: "orbitSession", value: "inbox-only", url },
     ]);
     await first.page.evaluate(() => localStorage.setItem("workspace", "inbox"));
     expect(
-      (await second.context.cookies()).find((c) => c.name === "orbitSession"),
-    ).toBeUndefined();
-    expect(
-      await second.page.evaluate(() => localStorage.getItem("workspace")),
-    ).toBeNull();
+      (await second.context.cookies()).find((c) => c.name === "orbitSession")
+        ?.value,
+    ).toBe("inbox-only");
+    expect(await second.page.evaluate(() => localStorage.getItem("workspace"))).toBe(
+      "inbox",
+    );
     await browsers.execute(project.id, a.id, {
       selector: "#search",
       description: "Search",
@@ -100,6 +102,7 @@ describe("real Chromium browser engine", () => {
     expect(b.artifacts).toHaveLength(0);
     await browsers.close(project.id, a.id);
     const reopened = await browsers.open(project.id, a.id);
+    expect(reopened.context).toBe(second.context);
     expect(
       (await reopened.context.cookies()).find((c) => c.name === "orbitSession")
         ?.value,
@@ -184,5 +187,51 @@ describe("real Chromium browser engine", () => {
       await stagehand.close();
     }
     expect(session.page.isClosed()).toBe(false);
+  });
+  it("uses an existing tab from an explicitly connected local Chrome without closing it", async () => {
+    const profile = await fs.mkdtemp(path.join(os.tmpdir(), "orbit-cdp-test-"));
+    let externalContext: Awaited<
+      ReturnType<typeof chromium.launchPersistentContext>
+    > | undefined;
+    let connected: BrowserManager | undefined;
+    try {
+      externalContext = await chromium.launchPersistentContext(profile, {
+        channel: "chrome",
+        headless: true,
+        args: [
+          "--remote-debugging-port=0",
+          "--remote-debugging-address=127.0.0.1",
+        ],
+      });
+      const page = await externalContext.newPage();
+      await page.goto(url);
+      const pageCount = externalContext.pages().length;
+      const [port] = (
+        await fs.readFile(path.join(profile, "DevToolsActivePort"), "utf8")
+      ).split("\n");
+      const externalProject = await store.create("Connected Chrome test");
+      const agent = await store.addAgent(externalProject.id, {
+        name: "Existing tab",
+        preset: "custom",
+        url,
+        instructions: "",
+        provider: { provider: "openai", model: "gpt-4.1" },
+      });
+      connected = new BrowserManager(store, {
+        cdpUrl: `http://127.0.0.1:${Number(port)}`,
+        previewInterval: 500,
+      });
+
+      const session = await connected.open(externalProject.id, agent.id);
+
+      expect(await session.page.title()).toBe("Orbit browser fixture");
+      expect(externalContext.pages()).toHaveLength(pageCount);
+      await connected.close(externalProject.id, agent.id);
+      expect(page.isClosed()).toBe(false);
+    } finally {
+      await connected?.closeAll();
+      await externalContext?.close();
+      await fs.rm(profile, { recursive: true, force: true });
+    }
   });
 });

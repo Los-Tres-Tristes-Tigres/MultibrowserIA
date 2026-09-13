@@ -16,8 +16,10 @@ test("create, move, configure and remove a browser agent; persist the canvas", a
     .click();
   await page.getByLabel("Name", { exact: true }).fill("Docs");
   await page.getByLabel("Website URL").fill("https://example.com/");
-  await page.getByLabel("AI provider").selectOption("gemini");
-  await page.getByLabel("Model", { exact: true }).fill("gemini-2.5-flash");
+  await page.getByLabel("AI provider").selectOption("openrouter");
+  await expect(page.getByLabel("Model", { exact: true })).toHaveValue(
+    "openrouter/free",
+  );
   await page.getByRole("button", { name: "Create agent", exact: true }).click();
   await expect(
     page.locator(".agent-list-item").filter({ hasText: "Docs" }),
@@ -45,7 +47,7 @@ test("create, move, configure and remove a browser agent; persist the canvas", a
       .position,
   );
   await page.getByRole("button", { name: "Settings for Docs" }).click();
-  await expect(page.getByLabel("AI provider")).toHaveValue("gemini");
+  await expect(page.getByLabel("AI provider")).toHaveValue("openrouter");
   await page.getByRole("button", { name: "Delete agent", exact: true }).click();
   await page.getByRole("button", { name: "Delete permanently" }).click();
   await expect(

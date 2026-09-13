@@ -38,6 +38,8 @@ export const agentInput = z
     preset: z.string().max(30).default("custom"),
     provider: providerSchema,
     instructions: z.string().max(8000).default(""),
+    lastChannel: z.string().max(80).optional(),
+    lastThread: z.string().max(80).optional(),
     position: z
       .object({ x: z.number().finite(), y: z.number().finite() })
       .optional(),
@@ -103,6 +105,9 @@ export function publicError(error: unknown) {
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "GEMINI_API_KEY",
+    "EXA_API_KEY",
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
   ]) {
     const key = process.env[name];
     if (key) message = message.split(key).join("[redacted]");

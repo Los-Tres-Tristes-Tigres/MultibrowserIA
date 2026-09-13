@@ -20,6 +20,18 @@ describe("local workspaces", () => {
     const s = await store();
     const p = await s.create("Test project", true);
     const [a, b] = p.agents;
+    expect(p.agents).toHaveLength(3);
+    expect(p.agents.map((agent) => agent.preset)).toEqual([
+      "gmail",
+      "calendar",
+      "slack",
+    ]);
+    expect(p.agents.every((agent) => agent.provider.provider === "openrouter")).toBe(
+      true,
+    );
+    expect(p.agents.every((agent) => agent.provider.model === "openrouter/free")).toBe(
+      true,
+    );
     expect(s.agentPath(p.id, a.id)).not.toEqual(s.agentPath(p.id, b.id));
     a.position = { x: -80, y: 410 };
     p.viewport = { x: 50, y: 60, zoom: 0.7 };
@@ -87,15 +99,34 @@ describe("local workspaces", () => {
     expect(recovered.get(p.id).runs[0].status).toBe("interrupted");
     expect(recovered.get(p.id).agents[0].activeRunId).toBeUndefined();
   });
+  it("migrates restored agents to OpenRouter free", async () => {
+    const s = await store();
+    const p = await s.create("Provider migration", true);
+    p.agents[0].provider = { provider: "openai", model: "gpt-4.1" };
+    await s.save(p.id);
+    const restored = new WorkspaceStore(s.root);
+    await restored.init();
+    expect(restored.get(p.id).agents.every((agent) => agent.provider)).toEqual(
+      true,
+    );
+    expect(restored.get(p.id).agents.map((agent) => agent.provider)).toEqual([
+      { provider: "openrouter", model: "openrouter/free" },
+      { provider: "openrouter", model: "openrouter/free" },
+      { provider: "openrouter", model: "openrouter/free" },
+    ]);
+  });
   it("removes exactly the chosen profile and its connections", async () => {
     const s = await store();
     const p = await s.create("Delete", true);
-    const [a, b] = p.agents;
+    const [a, b, slack] = p.agents;
     await s.removeAgent(p.id, a.id);
     expect(await fs.stat(s.agentPath(p.id, a.id)).catch(() => null)).toBeNull();
     expect((await fs.stat(s.agentPath(p.id, b.id))).isDirectory()).toBe(true);
+    expect((await fs.stat(s.agentPath(p.id, slack.id))).isDirectory()).toBe(
+      true,
+    );
     expect(p.connections).toHaveLength(0);
-    expect(p.agents.map((a) => a.id)).toEqual([b.id]);
+    expect(p.agents.map((agent) => agent.id)).toEqual([b.id, slack.id]);
     expect(() => s.agentPath(p.id, "../escape")).toThrow();
   });
 });

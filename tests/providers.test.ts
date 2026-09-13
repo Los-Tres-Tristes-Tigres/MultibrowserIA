@@ -3,6 +3,7 @@ import {
   createModel,
   providerInfo,
   assertProvider,
+  parsePlannerStep,
 } from "../server/providers.js";
 describe("per-agent provider configuration", () => {
   it("reports availability without returning credentials", () => {
@@ -32,6 +33,17 @@ describe("per-agent provider configuration", () => {
     expect(b.modelId).toBe("openai/gpt-4.1");
     expect(c.provider).toContain("google");
     expect(a).not.toBe(b);
+  });
+  it("recovers a finish step from messy model text instead of crashing", () => {
+    const fromJson = parsePlannerStep(
+      'Sure.\n```json\n{"kind":"extract","instruction":"Read #informal","url":null,"impact":"read","summary":"Reading the channel","data":"{}"}\n```',
+    );
+    expect(fromJson.kind).toBe("extract");
+    const fromProse = parsePlannerStep(
+      "En #informal hablaron de la demo y del CEO de Exa.",
+    );
+    expect(fromProse.kind).toBe("finish");
+    expect(fromProse.summary).toContain("#informal");
   });
   it("rejects a missing key before any browser task runs", () => {
     expect(() =>
